@@ -109,9 +109,15 @@ class BaseSource:
     async def _throttle(self) -> None:
         async with self._lock:
             loop = asyncio.get_running_loop()
-            wait = self.min_interval - (loop.time() - self._last_call)
-            if wait > 0:
-                await asyncio.sleep(wait)
+            # ``_last_call == 0`` يعني «لم يُستدعَ بعد». لا نحسب فاصلاً من
+            # الصفر: ``loop.time()`` هو ``time.monotonic()`` (زمن تشغيل النظام
+            # لا العملية)، وعلى جهاز جديد في GitHub Actions يكون ~30 ثانية،
+            # فينام أول استدعاء 1800 ثانية كاملة. هذا كان يجمّد التشغيل السحابي
+            # نصف ساعة قبل أي طلب شبكة.
+            if self._last_call:
+                wait = self.min_interval - (loop.time() - self._last_call)
+                if wait > 0:
+                    await asyncio.sleep(wait)
             self._last_call = loop.time()
 
     async def fetch(self) -> list[AircraftState]:

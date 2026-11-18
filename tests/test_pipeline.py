@@ -437,5 +437,29 @@ class PipelineEndToEndTests(unittest.TestCase):
         self.assertEqual(result.verdicts["8960d1"], "upheld")
 
 
+class ThrottleFirstCallTests(unittest.TestCase):
+    """أول طلب لا ينام فترة المصدر كاملة بسبب ساعة النظام."""
+
+    class _FreshLoop(asyncio.SelectorEventLoop):
+        """محاكاة جهاز أُقلع للتوّ: ``loop.time()`` = 30 ثانية."""
+
+        def time(self) -> float:  # type: ignore[override]
+            return 30.0
+
+    def test_first_call_does_not_wait_for_the_whole_interval(self) -> None:
+        from adsb_sources import PointSource
+
+        source = PointSource()
+        source.min_interval = 1800.0  # نفس فاصل OpenSky
+        source._last_call = 0.0
+
+        loop = self._FreshLoop()
+        try:
+            # مع العلّة القديمة كان الانتظار 1800 − 30 = 1770 ثانية.
+            loop.run_until_complete(asyncio.wait_for(source._throttle(), timeout=0.5))
+        finally:
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

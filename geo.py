@@ -83,9 +83,11 @@ class GeoResolver:
     async def _nominatim(self, lat: float, lon: float) -> tuple[str | None, str | None, str] | None:
         async with self._lock:
             loop = asyncio.get_running_loop()
-            wait = MIN_INTERVAL - (loop.time() - self._last_call)
-            if wait > 0:
-                await asyncio.sleep(wait)
+            # ``_last_call == 0`` يعني «أول طلب»: لا فاصل يُحسب من الصفر.
+            if self._last_call:
+                wait = MIN_INTERVAL - (loop.time() - self._last_call)
+                if wait > 0:
+                    await asyncio.sleep(wait)
             self._last_call = loop.time()
 
         params = {
