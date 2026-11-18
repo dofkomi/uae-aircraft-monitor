@@ -18,6 +18,10 @@ OPENSKY_TOKEN_URL = (
 )
 OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
 ADSBLOL_URL = "https://api.adsb.lol/v2/lat/{lat}/lon/{lon}/dist/{dist}"
+# بديل مجاني بنفس الصيغة تماماً: شبكة adsb.fi (بلا مفتاح ولا حساب).
+# adsb.lol يردّ 429 عند الاستعلام كل دقيقتين من عنوان واحد، فالمصدر الثاني
+# يضمن استمرار التغطية بدل تقرير فارغ.
+ADSBFI_URL = "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{dist}"
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
 
 
@@ -90,7 +94,17 @@ class BaseSource:
     def __init__(self) -> None:
         self.health = SourceHealth(name=self.name, ok=False)
         self._last_call = 0.0
+        self._cooldown_until = 0.0
         self._lock = asyncio.Lock()
+
+    def _in_cooldown(self) -> bool:
+        """هل ما زال المصدر في فترة تبريد بعد ردّ 429؟"""
+        return time.time() < self._cooldown_until
+
+    def _cool_down(self, seconds: int, message: str) -> None:
+        """يوقف المصدر مؤقتاً بدل إغراقه بطلبات مرفوضة."""
+        self._cooldown_until = time.time() + max(60, seconds)
+        self._mark_error(RuntimeError(message))
 
     async def _throttle(self) -> None:
         async with self._lock:
@@ -115,15 +129,20 @@ class BaseSource:
         log.warning("[%s] فشل الجلب: %s", self.name, exc)
 
 
-class AdsbLolSource(BaseSource):
-    """api.adsb.lol — مجاني بالكامل، لا يتطلب تسجيلاً أو مفتاح API."""
+class PointSource(BaseSource):
+    """مصدر استعلام نقطي بصيغة adsb.lol/adsb.fi (المفتاح ``ac`` أو ``aircraft``)."""
 
-    name = "adsb.lol"
+    name = "point"
     min_interval = 5.0
+    url_template = ADSBLOL_URL
+    cooldown_seconds = 900
 
     async def fetch(self) -> list[AircraftState]:
+        if self._in_cooldown():
+            self._mark_error(RuntimeError("تبريد مؤقت بعد 429 من المصدر"))
+            return []
         await self._throttle()
-        url = ADSBLOL_URL.format(
+        url = self.url_template.format(
             lat=settings.center_lat,
             lon=settings.center_lon,
             dist=settings.radius,
@@ -131,57 +150,85 @@ class AdsbLolSource(BaseSource):
         try:
             async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
                 async with session.get(url) as resp:
+                    if resp.status == 429:
+                        # لا نُصرّ على مصدر يرفضنا: نتراجع ونتيح الفرصة لغيره.
+                        retry = resp.headers.get("Retry-After", "")
+                        seconds = int(retry) if retry.isdigit() else self.cooldown_seconds
+                        self._cool_down(seconds, "429 Too Many Requests — تبريد مؤقت")
+                        return []
                     resp.raise_for_status()
                     payload = await resp.json(content_type=None)
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             self._mark_error(exc)
             return []
 
-        # صيغة adsb.lol الحالية: المفتاح "ac" والقيم بالأقدام/العُقد.
-        # حقل "now" بالمللي ثانية، لذلك نعتمد على ساعتنا المحلية مع "seen"
-        # (ثوانٍ مضت على آخر رسالة) لتفادي خلط الوحدات وانحراف ساعة الخادم.
-        rows = payload.get("ac") or payload.get("aircraft") or []
-        local_now = int(time.time())
-        result: list[AircraftState] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            icao = str(_first(row, "hex", "icao24", default="") or "").strip().lower()
-            # العناوين التي تبدأ بـ ~ ليست عناوين ICAO حقيقية
-            if not icao or icao.startswith("~"):
-                continue
-
-            callsign = _first(row, "flight", "callsign", default=None)
-            seen = _to_float(_first(row, "seen", "seen_pos"))
-            last_contact = int(local_now - seen) if seen is not None else _to_int(row.get("last_contact"))
-
-            # adsb.lol يبلّغ عن الطائرات على الأرض بـ alt_baro = "ground"
-            alt_baro = _first(row, "alt_baro", "baro_altitude")
-            on_ground = _ground_flag(row, alt_baro)
-
-            result.append(
-                AircraftState(
-                    icao24=icao,
-                    callsign=_clean_callsign(callsign),
-                    longitude=_to_float(_first(row, "lon", "longitude")),
-                    latitude=_to_float(_first(row, "lat", "latitude")),
-                    baro_altitude=_alt_to_m(alt_baro),
-                    geo_altitude=_alt_to_m(_first(row, "alt_geom", "geo_altitude")),
-                    velocity=_kts_to_ms(_first(row, "gs", "velocity", "speed")),
-                    true_track=_to_float(_first(row, "track", "true_track", "heading")),
-                    vertical_rate=_fpm_to_ms(_first(row, "baro_rate", "vertical_rate")),
-                    squawk=str(_first(row, "squawk", default="") or "") or None,
-                    last_contact=last_contact,
-                    on_ground=on_ground,
-                    source=self.name,
-                    registration=_first(row, "r", "registration", "reg", default=None),
-                    aircraft_type=_first(row, "t", "icao_type", "type", default=None),
-                    model=_first(row, "model", "aircraft", default=None),
-                    manufacturer=_first(row, "manufacturer", default=None),
-                )
-            )
+        result = _parse_adsb_payload(payload, self.name)
         self._mark_ok(len(result))
         return result
+
+
+def _parse_adsb_payload(payload: dict, source_name: str) -> list[AircraftState]:
+    """يحوّل استجابة شبكة ADS-B إلى كائنات ``AircraftState``.
+
+    صيغة adsb.lol/adsb.fi: المفتاح "ac" أو "aircraft"، القيم بالأقدام/العُقد.
+    حقل "now" بالمللي ثانية، لذلك نعتمد على ساعتنا المحلية مع "seen"
+    (ثوانٍ مضت على آخر رسالة) لتفادي خلط الوحدات وانحراف ساعة الخادم.
+    """
+    rows = payload.get("ac") or payload.get("aircraft") or []
+    local_now = int(time.time())
+    result: list[AircraftState] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        icao = str(_first(row, "hex", "icao24", default="") or "").strip().lower()
+        # العناوين التي تبدأ بـ ~ ليست عناوين ICAO حقيقية
+        if not icao or icao.startswith("~"):
+            continue
+
+        callsign = _first(row, "flight", "callsign", default=None)
+        seen = _to_float(_first(row, "seen", "seen_pos"))
+        last_contact = int(local_now - seen) if seen is not None else _to_int(row.get("last_contact"))
+
+        # الشبكتان تبلّغان عن الطائرات على الأرض بـ alt_baro = "ground"
+        alt_baro = _first(row, "alt_baro", "baro_altitude")
+        on_ground = _ground_flag(row, alt_baro)
+
+        result.append(
+            AircraftState(
+                icao24=icao,
+                callsign=_clean_callsign(callsign),
+                longitude=_to_float(_first(row, "lon", "longitude")),
+                latitude=_to_float(_first(row, "lat", "latitude")),
+                baro_altitude=_alt_to_m(alt_baro),
+                geo_altitude=_alt_to_m(_first(row, "alt_geom", "geo_altitude")),
+                velocity=_kts_to_ms(_first(row, "gs", "velocity", "speed")),
+                true_track=_to_float(_first(row, "track", "true_track", "heading")),
+                vertical_rate=_fpm_to_ms(_first(row, "baro_rate", "vertical_rate")),
+                squawk=str(_first(row, "squawk", default="") or "") or None,
+                last_contact=last_contact,
+                on_ground=on_ground,
+                source=source_name,
+                registration=_first(row, "r", "registration", "reg", default=None),
+                aircraft_type=_first(row, "t", "icao_type", "type", default=None),
+                model=_first(row, "model", "aircraft", default=None),
+                manufacturer=_first(row, "manufacturer", default=None),
+            )
+        )
+    return result
+
+
+class AdsbLolSource(PointSource):
+    """api.adsb.lol — مجاني بالكامل، لا يتطلب تسجيلاً أو مفتاح API."""
+
+    name = "adsb.lol"
+    url_template = ADSBLOL_URL
+
+
+class AdsbFiSource(PointSource):
+    """opendata.adsb.fi — مجاني بلا مفتاح، نفس صيغة adsb.lol تماماً."""
+
+    name = "adsb.fi"
+    url_template = ADSBFI_URL
 
 
 class OpenSkySource(BaseSource):
@@ -202,23 +249,18 @@ class OpenSkySource(BaseSource):
         self._expires_at = 0.0
         self._day = None
         self._used = 0
-        self._cooldown_until = 0.0
 
     def _budget_allows(self) -> bool:
         """هل تسمح ميزانية اليوم باستعلام آخر؟"""
         today = datetime.now(timezone.utc).date()
         if self._day != today:
             self._day, self._used = today, 0
-        if time.time() < self._cooldown_until:
+        if self._in_cooldown():
             return False
         return self._used < settings.opensky_daily_credits
 
     def _spend(self) -> None:
         self._used += 1
-
-    def _cool_down(self, seconds: int, message: str) -> None:
-        self._cooldown_until = time.time() + max(60, seconds)
-        self._mark_error(RuntimeError(message))
 
     async def _get_token(self, session: aiohttp.ClientSession) -> str | None:
         if not settings.has_opensky_credentials:
@@ -369,6 +411,8 @@ def build_sources() -> list[BaseSource]:
     sources: list[BaseSource] = []
     if settings.use_adsb_lol:
         sources.append(AdsbLolSource())
+    if settings.use_adsb_fi:
+        sources.append(AdsbFiSource())
     if settings.use_opensky:
         sources.append(OpenSkySource())
     if settings.use_watchlist:

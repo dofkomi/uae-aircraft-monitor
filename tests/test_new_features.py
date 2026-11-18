@@ -472,6 +472,87 @@ class OpenSkyBudgetTests(unittest.TestCase):
         self.assertNotIn("890000", source.icaos)
 
 
+class AdsbFiSourceTests(unittest.TestCase):
+    """المصدر الاحتياطي: نفس صيغة adsb.lol، مفتاح ``aircraft`` بدل ``ac``."""
+
+    def test_payload_with_aircraft_key_is_parsed(self) -> None:
+        from adsb_sources import _parse_adsb_payload
+
+        payload = {
+            "now": 1795032288.001,
+            "aircraft": [
+                {
+                    "hex": "896608",
+                    "flight": "UAE12   ",
+                    "r": "A6-EVN",
+                    "t": "A388",
+                    "alt_baro": 38000,
+                    "gs": 480,
+                    "track": 271.5,
+                    "baro_rate": -640,
+                    "squawk": "4733",
+                    "lat": 24.1,
+                    "lon": 54.2,
+                    "seen": 3,
+                },
+                {
+                    "hex": "~abcdef",
+                    "flight": "NOPOS",
+                },
+                {
+                    "hex": "89660a",
+                    "flight": "UAE99",
+                    "alt_baro": "ground",
+                    "gs": 12,
+                    "lat": 25.25,
+                    "lon": 55.36,
+                    "seen": 1,
+                },
+            ],
+            "resultCount": 3,
+        }
+
+        states = _parse_adsb_payload(payload, "adsb.fi")
+
+        self.assertEqual([s.icao24 for s in states], ["896608", "89660a"])
+        first = states[0]
+        self.assertEqual(first.callsign, "UAE12")
+        self.assertEqual(first.registration, "A6-EVN")
+        self.assertEqual(first.aircraft_type, "A388")
+        self.assertEqual(first.source, "adsb.fi")
+        self.assertAlmostEqual(first.baro_altitude, 38000 * 0.3048, places=1)
+        self.assertAlmostEqual(first.velocity, 480 * 0.514444, places=2)
+        self.assertFalse(first.on_ground)
+        self.assertIsNotNone(first.last_contact)
+
+        on_ground = states[1]
+        self.assertTrue(on_ground.on_ground)
+        self.assertEqual(on_ground.baro_altitude, 0.0)
+
+    def test_source_is_registered_in_build_sources(self) -> None:
+        from adsb_sources import AdsbFiSource, PointSource, build_sources
+        from config import settings
+
+        previous = settings.use_adsb_fi
+        settings.use_adsb_fi = True
+        try:
+            names = [source.name for source in build_sources()]
+        finally:
+            settings.use_adsb_fi = previous
+        self.assertIn("adsb.fi", names)
+        self.assertTrue(issubclass(AdsbFiSource, PointSource))
+
+    def test_cooldown_skips_network_after_429(self) -> None:
+        import asyncio
+
+        from adsb_sources import AdsbFiSource
+
+        source = AdsbFiSource()
+        source._cool_down(600, "429")
+        self.assertEqual(asyncio.run(source.fetch()), [])
+        self.assertIn("429", source.health.message)
+
+
 class DailyReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

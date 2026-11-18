@@ -52,7 +52,9 @@ def _mark_sent() -> None:
 def build_tracker() -> AircraftTracker:
     sources = build_sources()
     if not sources:
-        raise SystemExit("❌ لا توجد مصادر بيانات مُفعّلة. فعّل USE_ADSBLOL أو USE_OPENSKY.")
+        raise SystemExit(
+            "❌ لا توجد مصادر بيانات مُفعّلة. فعّل USE_ADSBLOL أو USE_ADSB_FI أو USE_OPENSKY."
+        )
     store = Store(settings.db_path)
     aircraft_db = AircraftDB(store)
     airports = AirportDB(settings.airports_cache_path)

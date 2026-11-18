@@ -59,6 +59,8 @@ class Settings:
 
         # المصادر
         self.use_adsb_lol: bool = _as_bool("USE_ADSBLOL", True)
+        # مصدر ثانٍ بنفس الصيغة: يستخدمه البوت تلقائياً عندما يردّ adsb.lol بـ429.
+        self.use_adsb_fi: bool = _as_bool("USE_ADSB_FI", True)
         self.use_opensky: bool = _as_bool("USE_OPENSKY", True)
         self.opensky_client_id: str = os.getenv("OPENSKY_CLIENT_ID", "").strip()
         self.opensky_client_secret: str = os.getenv("OPENSKY_CLIENT_SECRET", "").strip()
