@@ -219,7 +219,12 @@ C130 العسكرية)، تحليل استجابات OSINT (adsbdb/adsb.lol) ب�
 - لمتابعة هذه الطائرات **خارج** منطقة الإمارات، يستعلم البوت عن معرّفاتها عبر
   OpenSky كل `WATCHLIST_INTERVAL_SECONDS` (استعلام واحد بـ 1 رصيد مهما بلغ عددها).
   القائمة تُضاف إليها تلقائياً الطائرات الإماراتية المرصودة محلياً عند تفعيل
-  `WATCHLIST_DYNAMIC`.
+  `WATCHLIST_DYNAMIC`، وتُحفظ في قاعدة البيانات فتبقى بعد إعادة التشغيل.
+- **ميزانية OpenSky:** 400 رصيد/يوم للمجهول، وكل استعلام يكلّف رصيداً. لذلك
+  صندوق الإمارات كل `OPENSKY_INTERVAL_SECONDS` (30 دقيقة = 48/يوم) والقائمة كل
+  15 دقيقة (96/يوم) = 144/يوم. عند بلوغ `OPENSKY_DAILY_CREDITS` أو استلام 429
+  يتوقف المصدر مؤقتاً بدل استنزاف الحصة. adsb.lol يبقى المصدر الأساسي كل دقيقتين
+  بلا مفتاح ولا حصة.
 
 ## كيف تعمل الدراسة التحليلية المكتوبة (ذكاء اصطناعي مجاني)؟
 
@@ -362,9 +367,11 @@ LANDING_SPEED_KTS=80
 MIN_LEG_MINUTES=30
 
 USE_WATCHLIST=1                    # تتبّع عالمي بالـ ICAO24
-WATCHLIST_INTERVAL_SECONDS=300
-WATCHLIST_MAX=20
+WATCHLIST_INTERVAL_SECONDS=900
+WATCHLIST_MAX=60
 WATCHLIST_DYNAMIC=1
+OPENSKY_INTERVAL_SECONDS=1800      # ميزانية 400 رصيد/يوم
+OPENSKY_DAILY_CREDITS=360
 UAE_WATCH_ICAO24=                  # معرّفات إضافية مفصولة بفواصل
 
 OSINT_ENABLED=1                    # adsbdb (المسار) + adsb.lol (البث العالمي)
