@@ -5,7 +5,9 @@ name: UAE Aircraft Report
 # اختياري (دراسة الذكاء الاصطناعي المجانية): GEMINI_API_KEY أو GROQ_API_KEY أو OPENROUTER_API_KEY
 on:
   schedule:
-    - cron: '0 * * * *'
+    # الدقيقة 7 لا 0: GitHub يؤجّل بشدة الطلبات المجدولة عند رأس الساعة
+    # (ملايين المستودعات تطلبها في اللحظة نفسها)، وقد تتأخر ساعات أو تُهمَل.
+    - cron: '7 * * * *'
   workflow_dispatch:
 
 permissions:
