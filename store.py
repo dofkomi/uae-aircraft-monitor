@@ -1,6 +1,7 @@
 """تخزين محلي بسيط (SQLite) لبيانات الطائرات وأحداث فقدان الإشارة."""
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -8,6 +9,8 @@ from pathlib import Path
 from typing import Iterator
 
 from models import AircraftState, LandingEvent, SignalEvent
+
+log = logging.getLogger(__name__)
 
 
 class Store:
@@ -122,7 +125,32 @@ class Store:
             self._migrate(conn)
 
     _EXTRA_COLUMNS: dict[str, dict[str, str]] = {
+        # كل الأعمدة غير الأساسية: يسمح بترقية أي قاعدة بيانات قديمة تلقائياً
+        # (قواعد البيانات الأقدم كانت تفتقد country/nearest_airport وغيرها).
+        "meta": {
+            "registration": "TEXT",
+            "aircraft_type": "TEXT",
+            "model": "TEXT",
+            "manufacturer": "TEXT",
+            "operator": "TEXT",
+            "updated_at": "INTEGER",
+        },
+        "sightings": {
+            "callsign": "TEXT",
+            "lat": "REAL",
+            "lon": "REAL",
+            "altitude_ft": "INTEGER",
+            "source": "TEXT",
+        },
         "signal_events": {
+            "callsign": "TEXT",
+            "classification": "TEXT",
+            "lat": "REAL",
+            "lon": "REAL",
+            "reason": "TEXT",
+            "country": "TEXT",
+            "country_code": "TEXT",
+            "nearest_airport": "TEXT",
             "nearest_airport_name": "TEXT",
             "nearest_airport_country": "TEXT",
             "nearest_airport_km": "REAL",
@@ -131,22 +159,36 @@ class Store:
             "last_track": "REAL",
             "last_on_ground": "INTEGER",
             "last_source": "TEXT",
+            "geo_source": "TEXT",
         },
         "landings": {
+            "callsign": "TEXT",
+            "registration": "TEXT",
+            "classification": "TEXT",
+            "uae_related": "INTEGER",
+            "airport_ident": "TEXT",
+            "airport_name": "TEXT",
+            "airport_country": "TEXT",
+            "lat": "REAL",
+            "lon": "REAL",
+            "from_airport": "TEXT",
             "from_airport_name": "TEXT",
+            "from_country": "TEXT",
             "from_at": "INTEGER",
             "leg_minutes": "INTEGER",
             "leg_distance_km": "REAL",
+            "divergence": "INTEGER",
         },
     }
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        """يضيف الأعمدة الجديدة لقواعد البيانات القديمة دون فقدان البيانات."""
+        """يضيف الأعمدة الناقصة لقواعد البيانات القديمة دون فقدان البيانات."""
         for table, columns in self._EXTRA_COLUMNS.items():
             existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
             for name, sqltype in columns.items():
                 if name not in existing:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sqltype}")
+                    log.info("ترحيل: أُضيف العمود %s.%s", table, name)
 
     # ---------- بيانات تعريف الطائرة ----------
     def get_meta(self, icao24: str) -> dict | None:

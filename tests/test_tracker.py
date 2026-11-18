@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -12,7 +13,7 @@ import config
 from adsb_sources import BaseSource
 from airports import Airport
 from classifier import CIVILIAN, MILITARY, classify, is_uae_related
-from models import AircraftState
+from models import AircraftState, SignalEvent
 from store import Store
 from tracker import AircraftTracker
 
@@ -235,6 +236,120 @@ class AdsbParsingTests(unittest.TestCase):
 
         self.assertFalse(_ground_flag({"alt_baro": 30000}, 30000))
         self.assertFalse(_ground_flag({}, None))
+
+
+class SecurityTests(unittest.TestCase):
+    """البوت خاص: قائمة سماح صارمة + إخفاء التوكن من السجلات."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        config.settings.db_path = Path(self.tmp.name) / "test.db"
+        self._original_ids = config.settings.telegram_chat_ids
+
+    def tearDown(self) -> None:
+        config.settings.telegram_chat_ids = self._original_ids
+        self.tmp.cleanup()
+
+    def _bot(self):
+        from bot import ReportBot
+
+        bot = ReportBot(None)  # لا نحتاج متتبّعاً لاختبار الصلاحيات
+        bot.dynamic_chats.clear()
+        return bot
+
+    def test_allowlist_accepts_registered_chat_only(self) -> None:
+        config.settings.telegram_chat_ids = (111,)
+        bot = self._bot()
+        self.assertTrue(bot.is_allowed(111))
+        self.assertFalse(bot.is_allowed(222))
+
+    def test_empty_allowlist_rejects_everyone(self) -> None:
+        # fail-closed: لا «السماح للجميع» عند غياب الإعداد
+        config.settings.telegram_chat_ids = ()
+        bot = self._bot()
+        self.assertFalse(bot.is_allowed(111))
+
+    def test_dynamic_chat_can_be_added_by_owner(self) -> None:
+        config.settings.telegram_chat_ids = (111,)
+        bot = self._bot()
+        bot.dynamic_chats.add(333)
+        self.assertTrue(bot.is_allowed(333))
+
+    def test_token_is_redacted_from_logs(self) -> None:
+        import logging as logging_module
+
+        from secure_logging import RedactSecretsFilter
+
+        record = logging_module.LogRecord(
+            "httpx",
+            logging_module.INFO,
+            __file__,
+            1,
+            "HTTP Request: POST https://api.telegram.org/"
+            "bot123456789:AAFakeTokenValue1234567890/getMe",
+            None,
+            None,
+        )
+        RedactSecretsFilter().filter(record)
+        text = record.getMessage()
+        self.assertNotIn("AAFakeTokenValue", text)
+        self.assertIn("<محجوب>", text)
+
+
+class MigrationTests(unittest.TestCase):
+    def test_legacy_schema_gets_missing_columns(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        path = Path(tmp.name) / "old.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE signal_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                icao24 TEXT NOT NULL, callsign TEXT, classification TEXT,
+                last_seen INTEGER NOT NULL, lat REAL, lon REAL, reason TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE landings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                icao24 TEXT NOT NULL, callsign TEXT, registration TEXT,
+                classification TEXT, uae_related INTEGER, airport_ident TEXT,
+                airport_name TEXT, airport_country TEXT, at INTEGER NOT NULL,
+                lat REAL, lon REAL, from_airport TEXT, from_country TEXT,
+                divergence INTEGER
+            );
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        store = Store(path)
+        check = sqlite3.connect(path)
+        try:
+            columns = {
+                row[1] for row in check.execute("PRAGMA table_info(signal_events)")
+            }
+        finally:
+            check.close()
+        self.assertIn("country", columns)
+        self.assertIn("nearest_airport", columns)
+
+        # يجب أن يعمل الإدراج بعد الترقية (كان يفشل سابقاً)
+        store.add_event(
+            SignalEvent(
+                icao24="abc123",
+                callsign="TST1",
+                classification="civilian",
+                last_seen=datetime.now(timezone.utc),
+                last_lat=24.0,
+                last_lon=54.0,
+                country="الإمارات",
+                country_code="AE",
+                nearest_airport="OMDB",
+                geo_source="nominatim",
+            )
+        )
+        self.assertEqual(store.stats()["signal_events"], 1)
+        tmp.cleanup()
 
 
 class ClassifierTests(unittest.TestCase):

@@ -13,13 +13,11 @@ from bot import ReportBot
 from config import settings
 from geo import GeoResolver
 from reporter import build_report
+from secure_logging import setup_logging
 from store import Store
 from tracker import AircraftTracker
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-)
+setup_logging()
 log = logging.getLogger("uae-aircraft-monitor")
 
 

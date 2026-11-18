@@ -10,6 +10,11 @@ on:
 permissions:
   contents: write
 
+# منع تشغيل نسختين متزامنتين (تقارير مكرّرة + تعارض على ذاكرة التخزين المؤقت)
+concurrency:
+  group: uae-aircraft-report
+  cancel-in-progress: false
+
 jobs:
   report:
     runs-on: ubuntu-latest
