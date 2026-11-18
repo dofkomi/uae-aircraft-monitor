@@ -16,6 +16,10 @@ on:
         description: 'إرسال فوري حتى لو أُرسل تقرير قبل أقل من 40 دقيقة (لتجربة يدوية)'
         type: boolean
         default: false
+      source:
+        description: 'من استدعى التشغيل؟ (يُطبع في السجل — اتركه فارغاً للاستدعاء اليدوي)'
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -63,6 +67,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY || vars.OPENROUTER_API_KEY }}
         run: |
           set -o pipefail
+          echo "trigger: ${{ github.event_name }} · source: ${{ inputs.source }}"
           python main.py --send-once ${{ inputs.force && '--force-send' || '' }} 2>&1 | tee data/last-run.log
 
       # عند الفشل نكتب سجلاً مختصراً ونرفعه إلى المستودع، لأن سجلات Actions
