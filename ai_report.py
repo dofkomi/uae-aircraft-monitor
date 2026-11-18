@@ -745,9 +745,19 @@ def build_local_analysis(snapshot: dict) -> str:
         lines.append(f"- أبرز دول المواقع الحالية: {top}.")
     down = [item.get("name") for item in sources if not item.get("ok")]
     if down:
+        # adsb.lol وadsb.fi مصدران متكافئان: نجاح أحدهما يعني أن المواقع مكتملة،
+        # فلا نُوهم القارئ بثغرة تغطية لمجرد سقوط الآخر.
+        point_ok = any(
+            item.get("ok") and item.get("name") in ("adsb.lol", "adsb.fi")
+            for item in sources
+        )
         lines.append(
             f"- ⚠️ مصادر متعطّلة الآن: {'، '.join(str(name) for name in down)} — "
-            "التغطية أضعف من المعتاد، والغياب قد يكون سببه المصدر لا الطائرة."
+            + (
+                "لكن المصدر البديل يغطي مواقع الطائرات، فالغياب هنا سببه المصدر لا الطائرة."
+                if point_ok
+                else "التغطية أضعف من المعتاد، والغياب قد يكون سببه المصدر لا الطائرة."
+            )
         )
     else:
         lines.append(f"- كل المصادر ({len(sources)}) تعمل، فالتغطية متماسكة لهذه الدورة.")

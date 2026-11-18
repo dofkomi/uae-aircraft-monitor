@@ -395,7 +395,17 @@ def build_daily_report(tracker, hours: int = 24) -> str:
     down = [item["name"] for item in snap["sources"] if not item["ok"]]
     lines.append("🛰️ <b>جودة المصادر خلال الفترة</b>")
     if down:
-        lines.append(f"  • ⚠️ مصادر متعطّلة: {_esc('، '.join(down))} — ثغرة تغطية محتملة.")
+        # adsb.lol وadsb.fi متكافئان: سقوط أحدهما لا يعني ثغرة ما دام الآخر يعمل.
+        point_ok = any(
+            item["ok"] and item["name"] in ("adsb.lol", "adsb.fi")
+            for item in snap["sources"]
+        )
+        note = (
+            "المصدر البديل يعمل، فالمواقع مكتملة."
+            if point_ok
+            else "ثغرة تغطية محتملة."
+        )
+        lines.append(f"  • ⚠️ مصادر متعطّلة: {_esc('، '.join(down))} — {note}")
     else:
         lines.append(f"  • كل المصادر ({len(snap['sources'])}) تعمل.")
     lines.append("")

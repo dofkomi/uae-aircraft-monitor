@@ -552,6 +552,21 @@ class AdsbFiSourceTests(unittest.TestCase):
         self.assertEqual(asyncio.run(source.fetch()), [])
         self.assertIn("429", source.health.message)
 
+    def test_local_analysis_does_not_cry_coverage_gap_when_fallback_works(self) -> None:
+        from ai_report import build_local_analysis
+
+        text = build_local_analysis(
+            {
+                "sources": [
+                    {"name": "adsb.lol", "ok": False, "count": 0},
+                    {"name": "adsb.fi", "ok": True, "count": 105},
+                    {"name": "OpenSky", "ok": False, "count": 0},
+                ]
+            }
+        )
+        self.assertIn("المصدر البديل", text)
+        self.assertNotIn("التغطية أضعف من المعتاد", text)
+
 
 class DailyReportTests(unittest.TestCase):
     def setUp(self) -> None:
