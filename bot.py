@@ -1,7 +1,8 @@
-"""بوت تليجرام: أوامر تفاعلية + تقارير مجدولة كل نصف ساعة.
+"""بوت تليجرام: أوامر تفاعلية + تقارير مجدولة كل ساعة.
 
-البوت **خاص** افتراضياً: لا يستجيب إلا للمحادثات المذكورة في
-``TELEGRAM_CHAT_IDS`` أو التي أضافها المالك عبر ``/addchat``.
+كل تقرير = **دراسة تحليلية مكتوبة** (نموذج ذكاء اصطناعي مجاني أو محرّك
+محلي) + التقرير المفصّل. البوت **خاص** افتراضياً: لا يستجيب إلا للمحادثات
+المذكورة في ``TELEGRAM_CHAT_IDS`` أو التي أضافها المالك عبر ``/addchat``.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from telegram import BotCommand, Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
 from config import settings
-from reporter import build_report, build_status
+from reporter import build_messages, build_status
 from tracker import AircraftTracker
 
 log = logging.getLogger(__name__)
@@ -22,7 +23,8 @@ log = logging.getLogger(__name__)
 BOT_COMMANDS = [
     BotCommand("start", "🚀 معلومات البوت"),
     BotCommand("help", "📖 قائمة الأوامر"),
-    BotCommand("report", "📄 إرسال تقرير فوري"),
+    BotCommand("report", "📄 تقرير فوري (دراسة + تفاصيل)"),
+    BotCommand("analysis", "🧠 الدراسة التحليلية فقط"),
     BotCommand("status", "📊 حالة البوت والمصادر"),
     BotCommand("chats", "💬 المحادثات المسجّلة"),
     BotCommand("addchat", "➕ إضافة محادثة (للمالك فقط)"),
@@ -120,6 +122,11 @@ class ReportBot:
         for part in split_message(text):
             await update.message.reply_text(part, parse_mode="HTML")
 
+    @staticmethod
+    async def _send_many(update: Update, messages: list[str]) -> None:
+        for message in messages:
+            await ReportBot._send(update, message)
+
     # ------------------------------------------------------------------ أوامر
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # التسجيل الذاتي ممنوع: المحادثة يجب أن تكون مصرّحاً لها مسبقاً.
@@ -128,10 +135,12 @@ class ReportBot:
         await update.message.reply_text(
             "✅ <b>البوت جاهز.</b>\n\n"
             "سأرسل تقريراً كل "
-            f"<b>{settings.report_interval_minutes} دقيقة</b> يتضمّن حركة الطائرات "
-            "في المجال الجوي للإمارات ورصد فقدان إشارة ADS-B.\n\n"
+            f"<b>{settings.report_interval_minutes} دقيقة</b>: دراسة تحليلية مكتوبة "
+            "للبيانات ثم التقرير المفصّل (حركة الطائرات في المجال الجوي للإمارات، "
+            "ورصد فقدان إشارة ADS-B، وإثراء OSINT للمسارات).\n\n"
             "الأوامر:\n"
-            "  /report — تقرير فوري\n"
+            "  /report — تقرير فوري (دراسة + تفاصيل)\n"
+            "  /analysis — الدراسة التحليلية فقط\n"
             "  /status — حالة البوت والمصادر\n"
             "  /help — المساعدة\n"
             "  /stopchat — إيقاف التقارير هنا",
@@ -161,9 +170,29 @@ class ReportBot:
             )
             return
         self._last_report[chat_id] = now
-        await update.message.reply_text("⏳ جارٍ تحديث البيانات...")
+        await update.message.reply_text("⏳ جارٍ تحديث البيانات وتحليلها...")
         await self.tracker.poll()
-        await self._send(update, build_report(self.tracker))
+        await self._send_many(update, await build_messages(self.tracker))
+
+    async def analysis_cmd(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """الدراسة التحليلية وحدها (بدون قسم البيانات المفصّل)."""
+        if not await self._authorized(update):
+            return
+        from ai_report import build_analysis
+
+        await update.message.reply_text("⏳ جارٍ تحديث البيانات وتحليلها...")
+        await self.tracker.poll()
+        result = await build_analysis(self.tracker)
+        if not result:
+            await update.message.reply_text(
+                "ℹ️ التحليل معطّل. اضبط <code>AI_REPORT_MODE</code> على "
+                "<code>both</code> أو <code>analysis</code>.",
+                parse_mode="HTML",
+            )
+            return
+        await self._send(update, result[0])
 
     async def chats_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._authorized(update):
@@ -222,16 +251,21 @@ class ReportBot:
             log.exception("فشل الجلب المجدول: %s", exc)
 
     async def scheduled_report(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        text = build_report(self.tracker)
+        try:
+            messages = await build_messages(self.tracker)
+        except Exception as exc:  # noqa: BLE001 - لا يوقف خطأ التحليل الجدولة
+            log.exception("فشل بناء التقرير المجدول: %s", exc)
+            return
         for chat_id in self.recipients:
-            for part in split_message(text):
-                try:
-                    await context.bot.send_message(
-                        chat_id=chat_id, text=part, parse_mode="HTML",
-                        disable_web_page_preview=True,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("تعذّر الإرسال إلى %s: %s", chat_id, exc)
+            for message in messages:
+                for part in split_message(message):
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id, text=part, parse_mode="HTML",
+                            disable_web_page_preview=True,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("تعذّر الإرسال إلى %s: %s", chat_id, exc)
 
     # ------------------------------------------------------------------ إعداد
     async def _post_init(self, application: Application) -> None:
@@ -255,6 +289,7 @@ class ReportBot:
             ("start", self.start),
             ("help", self.help_cmd),
             ("report", self.report_cmd),
+            ("analysis", self.analysis_cmd),
             ("status", self.status_cmd),
             ("chats", self.chats_cmd),
             ("addchat", self.addchat_cmd),

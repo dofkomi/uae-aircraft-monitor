@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from urllib.request import Request, urlopen
 
 from airports import COUNTRY_NAMES
 
 log = logging.getLogger(__name__)
+
+KM_PER_DEGREE = 111.32
 
 COUNTRIES_URL = (
     "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/"
@@ -88,6 +91,42 @@ def _polygon_contains(lon: float, lat: float, polygon: Polygon) -> bool:
     return not any(_ring_contains(lon, lat, hole) for hole in polygon[1:])
 
 
+def _bbox_distance_km(
+    lat: float, lon: float, min_lon: float, min_lat: float, max_lon: float, max_lat: float
+) -> float:
+    """أقصر مسافة تقريبية من النقطة إلى صندوق إحداثيات الدولة (حد أدنى مضمون)."""
+    dlat = 0.0
+    if lat < min_lat:
+        dlat = min_lat - lat
+    elif lat > max_lat:
+        dlat = lat - max_lat
+    dlon = 0.0
+    if lon < min_lon:
+        dlon = min_lon - lon
+    elif lon > max_lon:
+        dlon = lon - max_lon
+    x = dlon * KM_PER_DEGREE * math.cos(math.radians(lat))
+    y = dlat * KM_PER_DEGREE
+    return math.hypot(x, y)
+
+
+def _segment_distance_km(
+    lat: float, lon: float, first: tuple[float, float], second: tuple[float, float]
+) -> float:
+    """مسافة النقطة إلى قطعة مستقيمة على سطح الأرض (إسقاط مستوٍ محلي)."""
+    scale = math.cos(math.radians(lat))
+    x1 = (first[0] - lon) * KM_PER_DEGREE * scale
+    y1 = (first[1] - lat) * KM_PER_DEGREE
+    x2 = (second[0] - lon) * KM_PER_DEGREE * scale
+    y2 = (second[1] - lat) * KM_PER_DEGREE
+    dx, dy = x2 - x1, y2 - y1
+    if dx == 0 and dy == 0:
+        return math.hypot(x1, y1)
+    t = -(x1 * dx + y1 * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+    return math.hypot(x1 + t * dx, y1 + t * dy)
+
+
 def flag_emoji(code: str | None) -> str:
     """علم الدولة من رمز ISO2 (حروف إقليمية)."""
     if not code or len(code) != 2 or not code.isalpha():
@@ -109,6 +148,7 @@ class CountryShapes:
         self.enabled = enabled
         self._features: list[tuple[float, float, float, float, str, str, list[Polygon]]] = []
         self._memo: dict[tuple[float, float], tuple[str | None, str | None]] = {}
+        self._nearest_memo: dict[tuple[float, float, float], tuple[str, str, float] | None] = {}
         self._loaded = False
 
     # ------------------------------------------------------------------
@@ -213,6 +253,54 @@ class CountryShapes:
         if self.ready:
             return "🌊 فوق المياه / خارج حدود الدول"
         return "—"
+
+    def nearest(
+        self, lat: float | None, lon: float | None, max_km: float = 200.0
+    ) -> tuple[str, str, float] | None:
+        """أقرب دولة لنقطة خارج الحدود (فوق المياه أو قرب ساحل).
+
+        يرجع ``(اسم الدولة، رمز ISO2، المسافة بالكيلومترات)`` أو ``None`` إذا
+        لم توجد دولة ضمن ``max_km``. يُستخدم فقط عند فشل التحديد المباشر،
+        ليُقال «الدولة القريبة» بدل ترك الموقع بلا دولة.
+        """
+        if lat is None or lon is None:
+            return None
+        key = (round(lat, 1), round(lon, 1), float(max_km))
+        if key in self._nearest_memo:
+            return self._nearest_memo[key]
+
+        self._ensure_loaded()
+        candidates: list[tuple[float, tuple]] = []
+        for feature in self._features:
+            min_lon, min_lat, max_lon, max_lat = feature[0], feature[1], feature[2], feature[3]
+            lower_bound = _bbox_distance_km(lat, lon, min_lon, min_lat, max_lon, max_lat)
+            if lower_bound <= max_km:
+                candidates.append((lower_bound, feature))
+        candidates.sort(key=lambda item: item[0])
+
+        best: tuple[str, str, float] | None = None
+        for lower_bound, feature in candidates:
+            # صندوق الدولة حد أدنى مضمون: إن تجاوز أفضل مسافة وجدناها فلا فائدة
+            if best is not None and lower_bound > best[2]:
+                break
+            _, _, _, _, code, name, polygons = feature
+            for polygon in polygons:
+                for ring in polygon:
+                    if len(ring) < 2:
+                        continue
+                    previous = ring[-1]
+                    for point in ring:
+                        distance = _segment_distance_km(lat, lon, previous, point)
+                        if best is None or distance < best[2]:
+                            best = (name, code, distance)
+                        previous = point
+
+        # صندوق الدولة حد أدنى مضمون، لكن أقرب رأس مضلّع قد يكون أبعد من الحد
+        if best is not None and best[2] > max_km:
+            best = None
+        self._nearest_memo[key] = best
+        return best
+
 
 
 _default: CountryShapes | None = None

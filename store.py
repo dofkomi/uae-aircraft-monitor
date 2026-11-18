@@ -1,10 +1,12 @@
 """تخزين محلي بسيط (SQLite) لبيانات الطائرات وأحداث فقدان الإشارة."""
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import time
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Iterator
 
@@ -112,6 +114,11 @@ class Store:
                     source       TEXT,
                     fetched_at   INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS osint_cache (
+                    key        TEXT PRIMARY KEY,
+                    payload    TEXT,
+                    fetched_at INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS poll_log (
                     id      INTEGER PRIMARY KEY AUTOINCREMENT,
                     at      INTEGER NOT NULL,
@@ -144,6 +151,7 @@ class Store:
         },
         "signal_events": {
             "callsign": "TEXT",
+            "registration": "TEXT",
             "classification": "TEXT",
             "lat": "REAL",
             "lon": "REAL",
@@ -160,6 +168,11 @@ class Store:
             "last_on_ground": "INTEGER",
             "last_source": "TEXT",
             "geo_source": "TEXT",
+            "route_json": "TEXT",
+            "still_broadcasting": "INTEGER",
+            "global_country": "TEXT",
+            "global_country_code": "TEXT",
+            "global_last_seen": "INTEGER",
         },
         "landings": {
             "callsign": "TEXT",
@@ -178,6 +191,7 @@ class Store:
             "leg_minutes": "INTEGER",
             "leg_distance_km": "REAL",
             "divergence": "INTEGER",
+            "route_json": "TEXT",
         },
     }
 
@@ -234,15 +248,16 @@ class Store:
         with self._tx() as conn:
             conn.execute(
                 "INSERT INTO signal_events "
-                "(icao24, callsign, classification, last_seen, lat, lon, reason, "
+                "(icao24, callsign, registration, classification, last_seen, lat, lon, reason, "
                 "country, country_code, nearest_airport, nearest_airport_name, "
                 "nearest_airport_country, nearest_airport_km, last_alt_ft, "
                 "last_speed_kts, last_track, last_on_ground, last_source, "
                 "geo_source, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     event.icao24,
                     event.callsign,
+                    event.registration,
                     event.classification,
                     int(event.last_seen.timestamp()),
                     event.last_lat,
@@ -286,14 +301,16 @@ class Store:
             )
 
     def add_landing(self, landing: LandingEvent) -> None:
+        from osint import route_to_json
+
         with self._tx() as conn:
             conn.execute(
                 "INSERT INTO landings "
                 "(icao24, callsign, registration, classification, uae_related, "
                 "airport_ident, airport_name, airport_country, at, lat, lon, "
                 "from_airport, from_airport_name, from_country, from_at, "
-                "leg_minutes, leg_distance_km, divergence) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "leg_minutes, leg_distance_km, divergence, route_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     landing.icao24,
                     landing.callsign,
@@ -313,6 +330,7 @@ class Store:
                     landing.leg_minutes,
                     landing.leg_distance_km,
                     int(landing.divergence),
+                    route_to_json(landing.route),
                 ),
             )
 
@@ -368,6 +386,57 @@ class Store:
                 "country_code=excluded.country_code, source=excluded.source, "
                 "fetched_at=excluded.fetched_at",
                 (key, country, country_code, source, int(time.time())),
+            )
+
+    def get_osint(
+        self, key: str, max_age: "timedelta | None" = None
+    ) -> dict | None:
+        """يقرأ عنصر OSINT مخزّناً (المسار/الحالة العالمية) إن لم ينتهِ أجله."""
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT * FROM osint_cache WHERE key = ?", (key,)
+            ).fetchone()
+        if not row:
+            return None
+        if max_age is not None:
+            age = time.time() - row["fetched_at"]
+            if age > max_age.total_seconds():
+                return None
+        try:
+            payload = json.loads(row["payload"]) if row["payload"] else None
+        except (TypeError, ValueError):
+            payload = None
+        return {"payload": payload, "fetched_at": row["fetched_at"]}
+
+    def save_osint(self, key: str, payload: dict | None, ttl: "timedelta") -> None:
+        """يخزّن نتيجة OSINT (أو وسم «لا يوجد» عند ``payload=None``)."""
+        raw = json.dumps(payload, ensure_ascii=False) if payload is not None else None
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO osint_cache (key, payload, fetched_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload, "
+                "fetched_at=excluded.fetched_at",
+                (key, raw, int(time.time())),
+            )
+
+    def update_event_osint(self, event: SignalEvent) -> None:
+        """يحفظ نتائج OSINT الخاصة بحدث انقطاع الإشارة."""
+        from osint import route_to_json
+
+        with self._tx() as conn:
+            conn.execute(
+                "UPDATE signal_events SET route_json = ?, still_broadcasting = ?, "
+                "global_country = ?, global_country_code = ?, global_last_seen = ? "
+                "WHERE icao24 = ? AND last_seen = ?",
+                (
+                    route_to_json(event.route),
+                    int(event.still_broadcasting),
+                    event.global_country,
+                    event.global_country_code,
+                    int(event.global_last_seen.timestamp()) if event.global_last_seen else None,
+                    event.icao24,
+                    int(event.last_seen.timestamp()),
+                ),
             )
 
     def events_since(self, since_ts: int, limit: int = 100) -> list[dict]:

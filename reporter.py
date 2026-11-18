@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from airports import country_name, haversine_km
-from classifier import is_uae_related, label
+from classifier import is_uae_related, is_uae_related_event, label
 from config import settings
 from country_shapes import default_shapes, flag_emoji
 from models import AircraftState, LandingEvent, SignalEvent
@@ -126,6 +126,19 @@ def _squawk_tag(squawk: str | None) -> str:
     return f" · 🔢 {squawk}"
 
 
+def _route_line(route) -> str:
+    """سطر المسار المجدول من OSINT: «🛫 دبي DXB → لندن LHR · Emirates»."""
+    if route is None:
+        return ""
+    origin = route.origin_label
+    dest = route.dest_label
+    text = f"🛫 {_esc(origin)} → {_esc(dest)}"
+    if route.airline:
+        text += f" · {_esc(route.airline)}"
+    text += " <i>(مسار مجدول — adsbdb)</i>"
+    return text
+
+
 def _aircraft_detail(
     state: AircraftState,
     classification: str,
@@ -173,19 +186,32 @@ def _aircraft_detail(
         f"· ↕️ {vrate_text}",
         f"    📡 {_esc(source)} · 🕐 آخر إشارة {contact}{_squawk_tag(state.squawk)}",
     ]
+    route_line = _route_line(state.route)
+    if route_line:
+        lines.append(f"    {route_line}")
     return "\n".join(lines)
 
 
-def _event_detail(event: SignalEvent, now: datetime) -> str:
-    country = event.country or _country_text(event.last_lat, event.last_lon)
-    if country in ("—", ""):
-        country = "دولة غير محددة"
+def _event_country_label(event: SignalEvent) -> str:
+    """دولة الانقطاع مع العلم، وتوضيح إن كانت «الدولة القريبة» لا دولة الموقع."""
+    country = event.country
+    if not country:
+        country = _country_text(event.last_lat, event.last_lon)
+        if country in ("—", ""):
+            country = "دولة غير محددة"
     flag = flag_emoji(event.country_code) if event.country_code else ""
-    country_label_text = f"{flag} {country}".strip()
+    text = f"{flag} {_esc(country)}".strip()
+    if event.geo_source == "nearest_country":
+        text += " <i>(الدولة القريبة)</i>"
+    return text
+
+
+def _event_detail(event: SignalEvent, now: datetime) -> str:
     name = event.callsign or event.icao24
+    registration = f" / {event.registration}" if event.registration else ""
     lines = [
-        f"  • <b>{_esc(name)}</b> [{_esc(label(event.classification))}] — "
-        f"<b>{_esc(country_label_text)}</b>",
+        f"  • <b>{_esc(name)}</b>{_esc(registration)} "
+        f"[{_esc(label(event.classification))}] — <b>{_event_country_label(event)}</b>",
         f"    🕐 آخر ظهور {_fmt_time(event.last_seen)} ({_ago(event.last_seen, now)}) "
         f"· 📍 {_fmt_pos(event.last_lat, event.last_lon)}",
         f"    ⛰️ {_fmt_alt(event.last_alt_ft)} · ⚡ {_fmt_speed(event.last_speed_kts)} "
@@ -203,6 +229,19 @@ def _event_detail(event: SignalEvent, now: datetime) -> str:
     reason = REASON_LABELS.get(event.reason, event.reason)
     source = f" · 📡 {_esc(event.last_source)}" if event.last_source else ""
     lines.append(f"    📶 السبب التقديري: {_esc(reason)}{source}")
+    route_line = _route_line(event.route)
+    if route_line:
+        lines.append(f"    {route_line}")
+    if event.still_broadcasting:
+        where = event.global_country or _country_text(event.global_lat, event.global_lon)
+        seen = ""
+        if event.global_last_seen:
+            seen = f" · آخر بث {_fmt_time(event.global_last_seen)}"
+        alt = f" · {_fmt_alt(event.global_alt_ft)}" if event.global_alt_ft else ""
+        lines.append(
+            f"    🔎 <b>OSINT (adsb.lol):</b> الإشارة لم تتوقف — الطائرة تُرصد "
+            f"الآن في {_esc(where)}{alt}{seen}. الأرجح خروجها من نطاق مستقبلاتنا."
+        )
     return "\n".join(lines)
 
 
@@ -239,6 +278,14 @@ def _landing_detail(item: LandingEvent) -> str:
     ]
     if item.divergence:
         lines.append("    ⚠️ <b>هبوط خارجي تلته وجهة غير الإمارات</b>")
+    route_line = _route_line(item.route)
+    if route_line:
+        lines.append(f"    {route_line}")
+    if item.route_mismatch:
+        lines.append(
+            f"    ⚠️ <b>مغادرة عن المسار المجدول:</b> الوجهة المعلنة "
+            f"{_esc(item.route.dest_icao)} والهبوط الفعلي {_esc(item.airport_ident)}"
+        )
     return "\n".join(lines)
 
 
@@ -290,7 +337,10 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         text = _country_text(event.last_lat, event.last_lon)
         return "غير محدد" if text in ("—", "") else text
 
-    by_country: Counter[str] = Counter(_event_country(event) for event in events)
+    # انقطاع الإشارة: التركيز على الطائرات الإماراتية/المستأجرة إماراتياً فقط
+    uae_events = [event for event in events if is_uae_related_event(event)]
+    other_events = [event for event in events if not is_uae_related_event(event)]
+    by_country: Counter[str] = Counter(_event_country(event) for event in uae_events)
 
     center = (settings.center_lat, settings.center_lon)
 
@@ -324,9 +374,11 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
             f"  • المتوسط: ارتفاع {_fmt_alt(avg_alt)} · سرعة {_fmt_speed(avg_speed)}"
         )
     lines.append(
-        f"  • انقطاع إشارة: <b>{len(events)}</b> طائرة في "
-        f"<b>{len(by_country)}</b> دولة · هبوطات: <b>{len(landings)}</b> "
-        f"· وجهات غير الإمارات: <b>{len(diverged)}</b>"
+        f"  • انقطاع إشارة (إماراتية): <b>{len(uae_events)}</b> طائرة في "
+        f"<b>{len(by_country)}</b> دولة · طائرات أخرى: <b>{len(other_events)}</b>"
+    )
+    lines.append(
+        f"  • هبوطات: <b>{len(landings)}</b> · وجهات غير الإمارات: <b>{len(diverged)}</b>"
     )
     if emergency:
         codes = ", ".join(sorted({s.squawk or "" for s in emergency}))
@@ -338,8 +390,8 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
     if by_country:
         country, count = by_country.most_common(1)[0]
         highlights.append(
-            f"أكثر دولة انقطع فوقها الإشارة: <b>{_esc(country)}</b> "
-            f"({count} طائرة · {_percent(count, len(events))})"
+            f"أكثر دولة انقطع فوقها الإشارة (طائرات إماراتية): <b>{_esc(country)}</b> "
+            f"({count} طائرة · {_percent(count, len(uae_events))})"
         )
     if uae_diverged:
         highlights.append(
@@ -390,30 +442,40 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         lines.append("  • لا توجد طائرات مرصودة حالياً.")
     lines.append("")
 
-    # ── التركيز الأساسي: الدولة التي انقطع فيها الإشارة ──
-    lines.append("🌍 <b>الدول التي انقطع فيها الإشارة (التركيز الرئيسي)</b>")
+    # ── التركيز الأساسي: الدولة التي انقطع فيها الإشارة (طائرات إماراتية فقط) ──
+    lines.append(
+        "🌍 <b>الدول التي انقطع فيها الإشارة — الطائرات الإماراتية</b> "
+        "<i>(التركيز الرئيسي)</i>"
+    )
     if by_country:
         for country, count in by_country.most_common():
             lines.append(
                 f"  • <b>{_esc(country)}</b>: {count} طائرة "
-                f"({_percent(count, len(events))})"
+                f"({_percent(count, len(uae_events))})"
             )
     else:
-        lines.append("  • لا توجد حالات انقطاع خلال هذه الفترة.")
+        lines.append("  • لا توجد حالات انقطاع لطائرات إماراتية خلال هذه الفترة.")
     lines.append("")
 
-    # ── تفاصيل فقدان الإشارة ──
-    lines.append("📡 <b>تفاصيل فقدان الإشارة ADS-B</b>")
-    if events:
+    # ── تفاصيل فقدان الإشارة (طائرات إماراتية فقط) ──
+    lines.append(
+        "📡 <b>تفاصيل فقدان الإشارة ADS-B — الطائرات الإماراتية</b>"
+    )
+    if uae_events:
         ordered = sorted(
-            events, key=lambda e: (e.country or "zzz", -e.last_seen.timestamp())
+            uae_events, key=lambda e: (e.country or "zzz", -e.last_seen.timestamp())
         )
         for event in ordered[: settings.max_report_aircraft]:
             lines.append(_event_detail(event, now))
-        if len(events) > settings.max_report_aircraft:
-            lines.append(f"  … و {len(events) - settings.max_report_aircraft} حدث آخر")
+        if len(uae_events) > settings.max_report_aircraft:
+            lines.append(f"  … و {len(uae_events) - settings.max_report_aircraft} حدث آخر")
     else:
-        lines.append("  • لا توجد أحداث فقدان إشارة خلال هذه الفترة.")
+        lines.append("  • لا توجد أحداث فقدان إشارة لطائرات إماراتية خلال هذه الفترة.")
+    if other_events:
+        lines.append(
+            f"  <i>طائرات أخرى: {len(other_events)} حدث — تُسجَّل في قاعدة البيانات "
+            "ولا تُفصَّل هنا (خارج نطاق التركيز).</i>"
+        )
     lines.append("")
 
     # ── الهبوطات المرصودة ──
@@ -546,7 +608,36 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         "نقطتي الهبوط وليست مسار الرحلة الفعلي. كما أن كثيراً من الطائرات "
         "العسكرية لا تبث ADS-B أصلاً.</i>"
     )
+    lines.append(
+        "<i>إثراء OSINT مجاني: adsbdb (المسار المجدول من نداء الاستدعاء) و"
+        "adsb.lol (البث العالمي للطائرة). المسار المجدول قد يكون قديماً أو "
+        "غير محدّث، والوجهة الفعلية تُعرف من الهبوط المرصود لا من الجدول.</i>"
+    )
     return "\n".join(lines)
+
+
+async def build_messages(
+    tracker: AircraftTracker,
+    period_minutes: int | None = None,
+    analyzer=None,
+) -> list[str]:
+    """رسائل التقرير الجاهزة للإرسال: دراسة مكتوبة + التقرير المفصّل.
+
+    الترتيب مقصود: الدراسة التحليلية أولاً (هي المطلوب أساساً)، ثم التفاصيل
+    الكاملة. في وضع ``AI_REPORT_MODE=analysis`` تُرسَل الدراسة وحدها، وفي
+    وضع ``off`` يُرسَل التقرير المفصّل فقط.
+    """
+    from ai_report import build_analysis
+
+    messages: list[str] = []
+    mode = settings.ai_report_mode
+    if mode in {"both", "analysis"}:
+        analysis = await build_analysis(tracker, period_minutes, analyzer)
+        if analysis:
+            messages.append(analysis[0])
+    if mode != "analysis":
+        messages.append(build_report(tracker, period_minutes))
+    return messages or [build_report(tracker, period_minutes)]
 
 
 def build_status(tracker: AircraftTracker) -> str:
@@ -564,9 +655,23 @@ def build_status(tracker: AircraftTracker) -> str:
         f"  • تحديد الدولة: {'مفعّل' if (tracker.geo and tracker.geo.enabled) else 'معطّل'}",
         f"  • حدود الدول المحلية: "
         f"{'جاهزة' if (tracker.geo and tracker.geo.shapes and tracker.geo.shapes.ready) else 'غير متاحة'}",
+        f"  • إثراء OSINT (مسار/بث عالمي): "
+        f"{'مفعّل' if (tracker.osint and tracker.osint.enabled) else 'معطّل'}",
+    ]
+    try:
+        from ai_report import AIAnalyzer
+
+        analyzer = AIAnalyzer()
+        ai_state = analyzer.describe() if analyzer.available else "معطّل (لا يوجد مفتاح)"
+        lines.append(
+            f"  • تقرير الذكاء الاصطناعي: {settings.ai_report_mode} · {_esc(ai_state)}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"  • تقرير الذكاء الاصطناعي: تعذّر الفحص ({_esc(exc)})")
+    lines.extend([
         "",
         "🔌 <b>المصادر</b>",
-    ]
+    ])
     for source in tracker.sources:
         state = "✅ يعمل" if source.health.ok else "⚠️ متوقف"
         detail = source.health.message if source.health.message else "—"

@@ -5,3 +5,4 @@ data/*.db
 data/chats.json
 data/airports_raw.csv
 data/*.log
+data/preview*.txt

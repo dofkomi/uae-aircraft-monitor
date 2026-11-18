@@ -1,10 +1,11 @@
 name: UAE Aircraft Report
 
-# بديل مجاني تماماً (بلا بطاقة ائتمان): تقرير كل نصف ساعة عبر GitHub Actions.
+# بديل مجاني تماماً (بلا بطاقة ائتمان): تقرير كل ساعة عبر GitHub Actions.
 # أضف TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_IDS في Settings > Secrets and variables > Actions
+# اختياري (دراسة الذكاء الاصطناعي المجانية): GEMINI_API_KEY أو GROQ_API_KEY أو OPENROUTER_API_KEY
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -41,6 +42,12 @@ jobs:
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           USE_GEOCODING: '1'
           USE_WATCHLIST: '1'
+          OSINT_ENABLED: '1'
+          AI_ENABLED: '1'
+          AI_REPORT_MODE: 'both'
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: python main.py --send-once
 
       # GitHub يعطّل الجدولة بعد 60 يوماً من عدم النشاط؛ نحدّث ملفاً مرة كل ~30 يوماً.

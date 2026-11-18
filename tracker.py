@@ -8,10 +8,11 @@ from datetime import datetime, timedelta, timezone
 from adsb_sources import BaseSource, WatchlistSource
 from aircraft_db import AircraftDB
 from airports import AirportDB, country_name, haversine_km
-from classifier import classify, is_uae_related
+from classifier import classify, is_uae_related, is_uae_related_event
 from config import settings
 from geo import GeoResolver
-from models import AircraftState, LandingEvent, SignalEvent
+from models import AircraftState, LandingEvent, RouteInfo, SignalEvent
+from osint import OsintClient
 from store import Store
 
 log = logging.getLogger(__name__)
@@ -19,6 +20,8 @@ log = logging.getLogger(__name__)
 KNOWN_RETENTION = timedelta(hours=6)
 MAX_RECENT_EVENTS = 200
 MAX_GEOCODE_PER_POLL = 8
+MAX_ROUTES_PER_POLL = 12
+MAX_OSINT_EVENTS_PER_POLL = 8
 MAX_LEG_AGE = timedelta(hours=24)
 
 
@@ -30,12 +33,14 @@ class AircraftTracker:
         store: Store,
         geo: GeoResolver | None = None,
         airports: AirportDB | None = None,
+        osint: OsintClient | None = None,
     ) -> None:
         self.sources = sources
         self.db = aircraft_db
         self.store = store
         self.geo = geo
         self.airports = airports
+        self.osint = osint
 
         self.current: dict[str, AircraftState] = {}
         self.known: dict[str, tuple[AircraftState, datetime]] = {}
@@ -57,6 +62,8 @@ class AircraftTracker:
     # ------------------------------------------------------------------
     async def poll(self) -> dict[str, AircraftState]:
         async with self._lock:
+            if self.osint:
+                self.osint.reset_poll_budget()
             results = await asyncio.gather(
                 *(source.fetch() for source in self.sources),
                 return_exceptions=True,
@@ -89,6 +96,9 @@ class AircraftTracker:
                     *(self.db.enrich(state) for state in enrich_targets),
                     return_exceptions=True,
                 )
+
+            # إثراء OSINT: مسار الرحلة للطائرات الإماراتية (adsbdb، مجاني)
+            await self._enrich_routes(merged)
 
             now = datetime.now(timezone.utc)
             seen_ids = set(merged)
@@ -142,6 +152,7 @@ class AircraftTracker:
                         last_seen=last_seen,
                         last_lat=state.latitude,
                         last_lon=state.longitude,
+                        registration=state.registration,
                         reason=self._guess_reason(state),
                         last_alt_ft=state.altitude_ft,
                         last_speed_kts=state.speed_kts,
@@ -159,7 +170,10 @@ class AircraftTracker:
             await self._enrich_events(new_events)
 
             # كشف الهبوط وتغيّر الوجهة
-            self._detect_landings(merged, now)
+            new_landings = self._detect_landings(merged, now)
+            await self._enrich_landings(new_landings)
+            for landing in new_landings:
+                self.store.add_landing(landing)
 
             self.current = merged
             self.last_poll = now
@@ -168,34 +182,177 @@ class AircraftTracker:
 
     # ------------------------------------------------------------------
     async def _enrich_events(self, events: list[SignalEvent]) -> None:
-        """يضيف اسم الدولة وأقرب مطار لكل حدث فقدان إشارة جديد."""
-        if not self.geo or not events:
-            return
-        for event in events[:MAX_GEOCODE_PER_POLL]:
-            try:
-                country, code, source = await self.geo.lookup(event.last_lat, event.last_lon)
-            except Exception as exc:  # noqa: BLE001 - لا يوقف التتبع بسبب فشل جغرافي
-                log.debug("تعذّر تحديد دولة الحدث %s: %s", event.icao24, exc)
-                continue
-            event.country = country
-            event.country_code = code
-            event.geo_source = source
-            if self.airports and event.last_lat is not None and event.last_lon is not None:
-                airport = self.airports.nearest(event.last_lat, event.last_lon, 50)
-                if airport:
-                    event.nearest_airport = airport.ident
-                    event.nearest_airport_name = airport.name
-                    event.nearest_airport_country = airport.country_code
-                    event.nearest_airport_km = haversine_km(
-                        event.last_lat, event.last_lon, airport.lat, airport.lon
-                    )
-            # تحديث الصف المُسجَّل مسبقاً بالبيانات الجغرافية دون تكراره
-            self.store.update_event_geo(event)
+        """يضيف الدولة (أو الدولة القريبة) وأقرب مطار لأحداث فقدان الإشارة.
 
-    def _detect_landings(self, merged: dict[str, AircraftState], now: datetime) -> None:
+        التركيز على الطائرات الإماراتية/المستأجرة إماراتياً: لها تُحدَّد الدولة
+        التي انقطع فوقها البث، وإن كانت النقطة فوق المياه تُذكر **الدولة
+        القريبة**. أما الطائرات الأخرى فيُحدَّد موقعها محلياً فقط بلا شبكة
+        وبلا استهلاك حصة Nominatim.
+        """
+        if not events:
+            return
+
+        uae_events: list[SignalEvent] = []
+        other_events: list[SignalEvent] = []
+        for event in events:
+            (uae_events if is_uae_related_event(event) else other_events).append(event)
+
+        shapes = getattr(self.geo, "shapes", None) if self.geo else None
+        if self.geo is not None:
+            if shapes is None:
+                # لا حدود محلية: السلوك القديم (Nominatim/أقرب مطار) للجميع
+                for event in events[:MAX_GEOCODE_PER_POLL]:
+                    await self._enrich_event(event)
+            else:
+                # غير الإماراتية: تحديد محلي سريع فقط، دون تخمين دولة قريبة
+                for event in other_events:
+                    try:
+                        name, code, source = shapes.lookup(event.last_lat, event.last_lon)
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("تعذّر تحديد موقع الحدث %s: %s", event.icao24, exc)
+                        continue
+                    self._apply_event_geo(event, name, code, source if name else "unknown")
+
+                # الإماراتية: محلي → الدولة القريبة → Nominatim عند الحاجة
+                for event in uae_events[:MAX_GEOCODE_PER_POLL]:
+                    await self._enrich_event(event)
+
+        # إثراء OSINT للطائرات الإماراتية فقط: المسار + البث العالمي
+        for event in uae_events[:MAX_OSINT_EVENTS_PER_POLL]:
+            await self._enrich_event_osint(event)
+
+    async def _enrich_event(self, event: SignalEvent) -> None:
+        try:
+            country, code, source = await self.geo.lookup(event.last_lat, event.last_lon)
+        except Exception as exc:  # noqa: BLE001 - لا يوقف التتبع بسبب فشل جغرافي
+            log.debug("تعذّر تحديد دولة الحدث %s: %s", event.icao24, exc)
+            return
+        self._apply_event_geo(event, country, code, source)
+
+    def _apply_event_geo(
+        self,
+        event: SignalEvent,
+        country: str | None,
+        code: str | None,
+        source: str,
+    ) -> None:
+        event.country = country
+        event.country_code = code
+        event.geo_source = source
+        if self.airports and event.last_lat is not None and event.last_lon is not None:
+            airport = self.airports.nearest(event.last_lat, event.last_lon, 50)
+            if airport:
+                event.nearest_airport = airport.ident
+                event.nearest_airport_name = airport.name
+                event.nearest_airport_country = airport.country_code
+                event.nearest_airport_km = haversine_km(
+                    event.last_lat, event.last_lon, airport.lat, airport.lon
+                )
+        # تحديث الصف المُسجَّل مسبقاً بالبيانات الجغرافية دون تكراره
+        self.store.update_event_geo(event)
+
+    # ------------------------------------------------------------------ OSINT
+    async def _enrich_routes(self, merged: dict[str, AircraftState]) -> None:
+        """يجلب مسار الرحلة (adsbdb) للطائرات الإماراتية الحالية.
+
+        المسار يوضّح «من أين وإلى أين» بدل رموز المطارات وحدها، ويُستخدم
+        لاحقاً لمقارنة الوجهة المجدولة بالهبوط الفعلي.
+        """
+        if not self.osint:
+            return
+        targets = [
+            state for state in merged.values()
+            if state.route is None and state.callsign and is_uae_related(state)
+        ][:MAX_ROUTES_PER_POLL]
+        if not targets:
+            return
+        routes = await asyncio.gather(
+            *(self.osint.route(state.callsign) for state in targets),
+            return_exceptions=True,
+        )
+        for state, route in zip(targets, routes):
+            if isinstance(route, BaseException):
+                log.debug("تعذّر جلب مسار %s: %s", state.callsign, route)
+                continue
+            state.route = route
+
+    async def _enrich_landings(self, landings: list[LandingEvent]) -> None:
+        """يضيف المسار المجدول لهبوطات الطائرات الإماراتية (لمقارنة الوجهة)."""
+        if not self.osint or not landings:
+            return
+        targets = [item for item in landings if item.uae_related][:6]
+        if not targets:
+            return
+        routes = await asyncio.gather(
+            *(self.osint.route(item.callsign) for item in targets),
+            return_exceptions=True,
+        )
+        for landing, route in zip(targets, routes):
+            if isinstance(route, BaseException):
+                continue
+            landing.route = route
+
+    async def _enrich_event_osint(self, event: SignalEvent) -> None:
+        """مسار الرحلة + هل ما تزال تبث عالمياً بعد انقطاعها عنّا؟
+
+        سؤال adsb.lol عن الطائرة عالمياً يفصل بين حالتين مختلفتين تماماً:
+          * ما تزال تبث في مكان آخر → الإشارة **لم تنقطع**، بل خرجت من
+            نطاق مستقبلاتنا (أو من تغطيتنا الإقليمية).
+          * لا رصد عالمي → احتمال إغلاق البث أو وجودها خارج تغطية الشبكة.
+        """
+        if not self.osint:
+            return
+        if event.route is None:
+            event.route = await self.osint.route(event.callsign)
+
+        state = await self.osint.global_state(event.icao24)
+        if not state:
+            return
+        event.still_broadcasting = True
+        event.global_lat = state.get("lat")
+        event.global_lon = state.get("lon")
+        event.global_alt_ft = state.get("alt_ft")
+        seen_at = state.get("seen_at")
+        if seen_at:
+            try:
+                event.global_last_seen = datetime.fromtimestamp(
+                    int(seen_at) / 1000, tz=timezone.utc
+                )
+            except (ValueError, OSError, TypeError):
+                event.global_last_seen = None
+        country, code = self._country_for(event.global_lat, event.global_lon)
+        event.global_country = country
+        event.global_country_code = code
+        try:
+            self.store.update_event_osint(event)
+        except Exception as exc:  # noqa: BLE001 - التخزين لا يوقف التقرير
+            log.debug("تعذّر حفظ OSINT للحدث %s: %s", event.icao24, exc)
+
+    def _country_for(
+        self, lat: float | None, lon: float | None
+    ) -> tuple[str | None, str | None]:
+        """دولة نقطة (مع الدولة القريبة عند الوقوع فوق المياه)."""
+        shapes = getattr(self.geo, "shapes", None) if self.geo else None
+        if shapes is None or lat is None or lon is None:
+            return None, None
+        try:
+            name, code, _ = shapes.lookup(lat, lon)
+            if name:
+                return name, code
+            near = shapes.nearest(lat, lon, settings.nearest_country_max_km)
+            if near:
+                return near[0], near[1]
+        except Exception as exc:  # noqa: BLE001
+            log.debug("تعذّر تحديد دولة النقطة العالمية: %s", exc)
+        return None, None
+
+    def _detect_landings(
+        self, merged: dict[str, AircraftState], now: datetime
+    ) -> list[LandingEvent]:
         """يرصد هبوط الطائرة في مطار، ويقارن بآخر هبوط لاكتشاف وجهة غير الإمارات."""
         if not self.airports:
-            return
+            return []
+        new_landings: list[LandingEvent] = []
 
         for icao, state in merged.items():
             altitude = state.altitude_ft
@@ -285,7 +442,7 @@ class AircraftTracker:
             )
             self.recent_landings.append(landing)
             self.recent_landings = self.recent_landings[-MAX_RECENT_EVENTS:]
-            self.store.add_landing(landing)
+            new_landings.append(landing)
             self.last_landing[icao] = landing
 
             if divergence:
@@ -293,6 +450,7 @@ class AircraftTracker:
                     "وجهة غير الإمارات: %s من %s إلى %s",
                     icao, from_airport, airport.ident,
                 )
+        return new_landings
 
     # ------------------------------------------------------------------
     @staticmethod

@@ -53,7 +53,7 @@ class Settings:
 
         # التوقيت
         self.poll_interval_seconds: int = max(30, _as_int("POLL_INTERVAL_SECONDS", 120))
-        self.report_interval_minutes: int = max(1, _as_int("REPORT_INTERVAL_MINUTES", 30))
+        self.report_interval_minutes: int = max(1, _as_int("REPORT_INTERVAL_MINUTES", 60))
         self.signal_loss_minutes: int = max(5, _as_int("SIGNAL_LOSS_MINUTES", 20))
         self.max_report_aircraft: int = max(1, _as_int("MAX_REPORT_AIRCRAFT", 20))
 
@@ -69,6 +69,8 @@ class Settings:
         self.countries_path: Path = Path(
             os.getenv("COUNTRIES_GEOJSON_PATH", "data/countries.geojson")
         )
+        # أقصى مسافة لاعتبار دولة ما «الدولة القريبة» عند انقطاع الإشارة فوق المياه
+        self.nearest_country_max_km: float = _as_float("NEAREST_COUNTRY_MAX_KM", 200.0)
         self.nominatim_user_agent: str = os.getenv(
             "NOMINATIM_USER_AGENT", "uae-aircraft-monitor/1.0 (research)"
         )
@@ -96,6 +98,30 @@ class Settings:
             for value in os.getenv("UAE_WATCH_ICAO24", "").split(",")
             if value.strip()
         )
+
+        # ── إثراء OSINT مجاني (بلا مفاتيح) ──
+        self.osint_enabled: bool = _as_bool("OSINT_ENABLED", True)
+        self.osint_max_routes_per_poll: int = max(
+            1, _as_int("OSINT_MAX_ROUTES_PER_POLL", 12)
+        )
+
+        # ── تقرير الذكاء الاصطناعي (نماذج مجانية) ──
+        # AI_PROVIDER: gemini | groq | openrouter | custom (فراغ = كشف تلقائي)
+        self.ai_provider: str = os.getenv("AI_PROVIDER", "").strip().lower()
+        self.ai_api_key: str = os.getenv("AI_API_KEY", "").strip()
+        self.ai_base_url: str = os.getenv("AI_BASE_URL", "").strip()
+        self.ai_model: str = os.getenv("AI_MODEL", "").strip()
+        self.ai_enabled: bool = _as_bool("AI_ENABLED", True)
+        # both = تحليل مكتوب + التقرير المفصّل | analysis = التحليل وحده | off
+        self.ai_report_mode: str = (
+            os.getenv("AI_REPORT_MODE", "both").strip().lower() or "both"
+        )
+        self.ai_max_tokens: int = max(200, _as_int("AI_MAX_TOKENS", 1200))
+        self.ai_timeout_seconds: int = max(10, _as_int("AI_TIMEOUT_SECONDS", 45))
+        self.ai_temperature: float = _as_float("AI_TEMPERATURE", 0.3)
+        self.gemini_api_key: str = os.getenv("GEMINI_API_KEY", "").strip()
+        self.groq_api_key: str = os.getenv("GROQ_API_KEY", "").strip()
+        self.openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "").strip()
 
         # التخزين
         self.db_path: Path = Path(os.getenv("DB_PATH", "data/aircraft.db"))

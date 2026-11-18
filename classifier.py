@@ -113,24 +113,48 @@ def label(classification: str) -> str:
     )
 
 
+def _uae_match(
+    icao24: str | None,
+    callsign: str | None,
+    registration: str | None,
+    model: str | None = None,
+    manufacturer: str | None = None,
+) -> bool:
+    """المنطق المشترك لتمييز الطائرات الإماراتية/المستأجرة إماراتياً."""
+    from config import settings  # استيراد مؤخر لتجنّب الدورة
+
+    registration_text = (registration or "").upper().strip()
+    callsign_text = (callsign or "").upper().strip()
+    text = f"{model or ''} {manufacturer or ''}".lower()
+
+    if (icao24 or "").lower() in settings.uae_watch_icao24:
+        return True
+    if registration_text.startswith("A6-"):
+        return True
+    if callsign_text.startswith(("UAE", "ETD", "FDB", "ABY")):
+        return True
+    if any(word in text for word in ("emirates", "etihad", "flydubai", "air arabia")):
+        return True
+    return False
+
+
 def is_uae_related(state: AircraftState) -> bool:
     """هل الطائرة إماراتية أو مرتبطة بالإمارات (مستأجرة/مشغّلة من قِبل جهة إماراتية)؟
 
     المعايير كلها من بيانات عامة: التسجيل A6-، نداءات الخطوط الإماراتية،
     أو قائمة صريحة يحددها المستخدم في .env (UAE_WATCH_ICAO24).
     """
-    from config import settings  # استيراد مؤخر لتجنّب الدورة
+    return _uae_match(
+        state.icao24, state.callsign, state.registration, state.model, state.manufacturer
+    )
 
-    registration = (state.registration or "").upper().strip()
-    callsign = (state.callsign or "").upper().strip()
-    text = f"{state.model or ''} {state.manufacturer or ''}".lower()
 
-    if state.icao24.lower() in settings.uae_watch_icao24:
-        return True
-    if registration.startswith("A6-"):
-        return True
-    if callsign.startswith(("UAE", "ETD", "FDB", "ABY")):
-        return True
-    if any(word in text for word in ("emirates", "etihad", "flydubai", "air arabia")):
-        return True
-    return False
+def is_uae_related_event(event) -> bool:
+    """نفس المعايير لأحداث فقدان الإشارة (لا تحتوي كل حقول الحالة)."""
+    return _uae_match(
+        getattr(event, "icao24", None),
+        getattr(event, "callsign", None),
+        getattr(event, "registration", None),
+        getattr(event, "model", None),
+        getattr(event, "manufacturer", None),
+    )

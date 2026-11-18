@@ -13,7 +13,8 @@ from bot import ReportBot
 from config import settings
 from country_shapes import CountryShapes
 from geo import GeoResolver
-from reporter import build_report
+from osint import OsintClient
+from reporter import build_messages
 from secure_logging import setup_logging
 from store import Store
 from tracker import AircraftTracker
@@ -39,14 +40,24 @@ def build_tracker() -> AircraftTracker:
         user_agent=settings.nominatim_user_agent,
         enabled=settings.use_geocoding,
         shapes=shapes,
+        nearest_max_km=settings.nearest_country_max_km,
     )
-    return AircraftTracker(sources, aircraft_db, store, geo=geo, airports=airports)
+    osint = OsintClient(
+        store=store,
+        enabled=settings.osint_enabled,
+        user_agent=settings.nominatim_user_agent,
+        max_routes_per_poll=settings.osint_max_routes_per_poll,
+    )
+    return AircraftTracker(
+        sources, aircraft_db, store, geo=geo, airports=airports, osint=osint
+    )
 
 
 async def _once() -> None:
     tracker = build_tracker()
     await tracker.poll()
-    print(build_report(tracker))
+    messages = await build_messages(tracker)
+    print(("\n\n" + "─" * 60 + "\n\n").join(messages))
 
 
 async def _send_once() -> None:
@@ -62,17 +73,18 @@ async def _send_once() -> None:
         raise SystemExit(
             "❌ لا توجد محادثات مسجّلة. أرسل /start للبوت أو حدّد TELEGRAM_CHAT_IDS."
         )
-    text = build_report(tracker)
+    messages = await build_messages(tracker)
     async with Bot(settings.telegram_token) as tg:
         for chat_id in recipients:
-            for part in split_message(text):
-                await tg.send_message(
-                    chat_id=chat_id,
-                    text=part,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-    log.info("تم إرسال التقرير إلى %d محادثة", len(recipients))
+            for message in messages:
+                for part in split_message(message):
+                    await tg.send_message(
+                        chat_id=chat_id,
+                        text=part,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+    log.info("تم إرسال %d رسالة إلى %d محادثة", len(messages), len(recipients))
 
 
 def main() -> None:

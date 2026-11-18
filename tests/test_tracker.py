@@ -428,6 +428,337 @@ class CountryShapeTests(unittest.TestCase):
         self.assertIsNotNone(store.get_geo(key))
         tmp.cleanup()
 
+    # ── الدولة القريبة (لأحداث الانقطاع فوق المياه) ──
+    def test_nearest_country_over_water_near_uae(self) -> None:
+        near = self.shapes.nearest(25.15, 54.90, 200)
+        self.assertIsNotNone(near)
+        self.assertEqual(near[1], "AE")
+        self.assertLess(near[2], 200)
+
+    def test_nearest_respects_max_distance(self) -> None:
+        # وسط المحيط الهادي: لا دولة ضمن 200 كم
+        self.assertIsNone(self.shapes.nearest(0.0, -160.0, 200))
+
+    def test_geo_resolver_uses_nearest_country_source(self) -> None:
+        from geo import GeoResolver
+
+        tmp = tempfile.TemporaryDirectory()
+        store = Store(Path(tmp.name) / "near.db")
+        resolver = GeoResolver(
+            store=store, airports=None, enabled=False,
+            shapes=self.shapes, nearest_max_km=200.0,
+        )
+        country, code, source = asyncio.run(resolver.lookup(25.15, 54.90))
+        self.assertEqual(code, "AE")
+        self.assertEqual(source, "nearest_country")
+        self.assertIn("الإمارات", country or "")
+        tmp.cleanup()
+
+
+class OsintParsingTests(unittest.TestCase):
+    """تحليل استجابات adsbdb / adsb.lol بلا شبكة."""
+
+    PAYLOAD = {
+        "response": {
+            "flightroute": {
+                "callsign": "UAE1",
+                "airline": {"name": "Emirates", "country": "United Arab Emirates"},
+                "origin": {
+                    "icao_code": "OMDB", "iata_code": "DXB", "municipality": "Dubai",
+                    "country_iso_name": "AE",
+                },
+                "destination": {
+                    "icao_code": "EGLL", "iata_code": "LHR", "municipality": "London",
+                    "country_iso_name": "GB",
+                },
+            }
+        }
+    }
+
+    def test_route_parsed_from_adsbdb(self) -> None:
+        from osint import parse_route
+
+        route = parse_route(self.PAYLOAD, "uae1")
+        self.assertIsNotNone(route)
+        self.assertEqual(route.airline, "Emirates")
+        self.assertEqual(route.origin_icao, "OMDB")
+        self.assertEqual(route.dest_icao, "EGLL")
+        self.assertEqual(route.origin_label, "Dubai DXB")
+        self.assertEqual(route.route_label, "OMDB → EGLL")
+
+    def test_route_absent_returns_none(self) -> None:
+        from osint import parse_route
+
+        self.assertIsNone(parse_route({"response": {}}, "XXX1"))
+        self.assertIsNone(parse_route(None, "XXX1"))
+
+    def test_global_state_parsed(self) -> None:
+        from osint import parse_global_state
+
+        state = parse_global_state(
+            {"ac": [{"lat": 25.1, "lon": 55.2, "alt_baro": 30000, "flight": "UAE1 "}],
+             "now": 1795000000000}
+        )
+        self.assertEqual(state["alt_ft"], 30000)
+        self.assertFalse(state["on_ground"])
+        self.assertEqual(state["callsign"], "UAE1")
+
+    def test_global_state_on_ground(self) -> None:
+        from osint import parse_global_state
+
+        state = parse_global_state({"ac": [{"lat": 25.1, "lon": 55.2, "alt_baro": "ground"}]})
+        self.assertTrue(state["on_ground"])
+        self.assertIsNone(state["alt_ft"])
+
+    def test_global_state_empty(self) -> None:
+        from osint import parse_global_state
+
+        self.assertIsNone(parse_global_state({"ac": [], "total": 0}))
+        self.assertIsNone(parse_global_state({"ac": [{"lat": None}]}))
+
+    def test_osint_cache_roundtrip(self) -> None:
+        from models import RouteInfo
+
+        tmp = tempfile.TemporaryDirectory()
+        store = Store(Path(tmp.name) / "osint.db")
+        route = RouteInfo(callsign="UAE1", airline="Emirates", dest_icao="EGLL")
+        store.save_osint("route:UAE1", route.to_dict(), ttl=timedelta(days=1))
+        row = store.get_osint("route:UAE1", max_age=timedelta(days=1))
+        self.assertIsNotNone(row)
+        self.assertEqual(RouteInfo.from_dict(row["payload"]).dest_icao, "EGLL")
+        # انتهاء الأجل يُعيد None
+        self.assertIsNone(store.get_osint("route:UAE1", max_age=timedelta(seconds=0)))
+        tmp.cleanup()
+
+
+class FakeOsint:
+    def __init__(self, route=None, global_state=None) -> None:
+        self._route = route
+        self._global = global_state
+        self.route_calls: list[str] = []
+        self.global_calls: list[str] = []
+
+    def reset_poll_budget(self) -> None:
+        pass
+
+    def cached_route(self, callsign):
+        return self._route
+
+    async def route(self, callsign):
+        self.route_calls.append(callsign)
+        return self._route
+
+    async def global_state(self, icao24):
+        self.global_calls.append(icao24)
+        return self._global
+
+
+class SignalOsintTests(unittest.TestCase):
+    """إثراء OSINT لأحداث الانقطاع: للطائرات الإماراتية فقط."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        config.settings.db_path = Path(self.tmp.name) / "test.db"
+        config.settings.signal_loss_minutes = 5
+        self.store = Store(config.settings.db_path)
+        self.db = DummyDB()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _route(self):
+        from models import RouteInfo
+
+        return RouteInfo(
+            callsign="UAE900", airline="Emirates",
+            origin_icao="OMDB", origin_iata="DXB", origin_name="دبي",
+            dest_icao="EGLL", dest_iata="LHR", dest_name="لندن",
+        )
+
+    def test_uae_event_gets_route_and_global_check(self) -> None:
+        old = int((datetime.now(timezone.utc) - timedelta(minutes=30)).timestamp())
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        osint = FakeOsint(
+            route=self._route(),
+            global_state={"lat": 40.0, "lon": 30.0, "alt_ft": 33000,
+                          "on_ground": False, "callsign": "UAE900", "seen_at": now_ms},
+        )
+        state = AircraftState(
+            icao24="uae777", callsign="UAE900", registration="A6-XXX",
+            latitude=25.15, longitude=54.90, last_contact=old,
+        )
+        source = FakeSource([state])
+        tracker = AircraftTracker(
+            [source], self.db, self.store, geo=FakeGeo(),
+            airports=FakeAirports(), osint=osint,
+        )
+        asyncio.run(tracker.poll())
+        self.assertIsNotNone(tracker.current["uae777"].route)
+
+        source.states = []
+        asyncio.run(tracker.poll())
+        event = tracker.recent_events[0]
+        self.assertIsNotNone(event.route)
+        self.assertEqual(event.route.dest_icao, "EGLL")
+        self.assertTrue(event.still_broadcasting)
+        self.assertEqual(event.global_lat, 40.0)
+        self.assertEqual(event.global_alt_ft, 33000)
+        self.assertIn("uae777", osint.global_calls)
+
+    def test_foreign_event_skips_osint(self) -> None:
+        old = int((datetime.now(timezone.utc) - timedelta(minutes=30)).timestamp())
+        osint = FakeOsint(route=self._route(), global_state={"lat": 40.0, "lon": 30.0})
+        state = AircraftState(
+            icao24="fgn001", callsign="FOREIGN1", registration="F-GABC",
+            latitude=33.3, longitude=44.4, last_contact=old,
+        )
+        source = FakeSource([state])
+        tracker = AircraftTracker(
+            [source], self.db, self.store, geo=FakeGeo(),
+            airports=FakeAirports(), osint=osint,
+        )
+        asyncio.run(tracker.poll())
+        source.states = []
+        asyncio.run(tracker.poll())
+        event = tracker.recent_events[0]
+        self.assertIsNone(event.route)
+        self.assertFalse(event.still_broadcasting)
+        self.assertEqual(osint.global_calls, [])
+        self.assertEqual(osint.route_calls, [])
+
+
+class AiReportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        config.settings.db_path = Path(self.tmp.name) / "test.db"
+        self.store = Store(config.settings.db_path)
+        self._mode = config.settings.ai_report_mode
+        self._enabled = config.settings.ai_enabled
+
+    def tearDown(self) -> None:
+        config.settings.ai_report_mode = self._mode
+        config.settings.ai_enabled = self._enabled
+        self.tmp.cleanup()
+
+    def _tracker(self):
+        state = AircraftState(
+            icao24="ai001", callsign="UAE123", registration="A6-ABC",
+            aircraft_type="B738", latitude=25.0, longitude=55.0,
+            baro_altitude=10000.0, velocity=230.0,
+        )
+        tracker = AircraftTracker(
+            [FakeSource([state])], DummyDB(), self.store, airports=FakeAirports()
+        )
+        asyncio.run(tracker.poll())
+        return tracker
+
+    def test_format_ai_text_converts_markup_safely(self) -> None:
+        from ai_report import format_ai_text
+
+        text = format_ai_text("## الخلاصة\n- نقطة <script>\n**نص عريض**")
+        self.assertIn("<b>الخلاصة</b>", text)
+        self.assertIn("• نقطة &lt;script&gt;", text)
+        self.assertIn("نص عريض", text)
+        self.assertNotIn("**", text)
+        self.assertNotIn("<script>", text)
+
+    def test_snapshot_has_expected_sections(self) -> None:
+        from ai_report import build_snapshot
+
+        tracker = self._tracker()
+        snapshot = build_snapshot(tracker, 60)
+        for key in (
+            "totals", "countries_now", "uae_aircraft_now",
+            "signal_loss_uae", "landings", "window_minutes",
+        ):
+            self.assertIn(key, snapshot)
+        self.assertEqual(snapshot["window_minutes"], 60)
+        self.assertEqual(snapshot["totals"]["aircraft_now"], 1)
+        self.assertEqual(len(snapshot["uae_aircraft_now"]), 1)
+        self.assertEqual(snapshot["uae_aircraft_now"][0]["callsign"], "UAE123")
+
+    def test_local_analysis_is_written_prose(self) -> None:
+        from ai_report import build_local_analysis, build_snapshot
+
+        snapshot = build_snapshot(self._tracker(), 60)
+        text = build_local_analysis(snapshot)
+        self.assertIn("## الخلاصة", text)
+        self.assertIn("## الطائرات الإماراتية", text)
+        self.assertIn("## انقطاع الإشارة", text)
+        self.assertIn("UAE123", text)
+        self.assertIn("ADS-B", text)
+
+
+class FakeAnalyzer:
+    available = True
+    last_error = ""
+
+    def describe(self) -> str:
+        return "نموذج تجريبي · test-model"
+
+    async def analyze(self, snapshot):
+        return "## الخلاصة\n- رُصدت طائرات في المنطقة."
+
+
+class ReportMessagesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        config.settings.db_path = Path(self.tmp.name) / "test.db"
+        self.store = Store(config.settings.db_path)
+        self._mode = config.settings.ai_report_mode
+        self._enabled = config.settings.ai_enabled
+        state = AircraftState(
+            icao24="msg01", callsign="UAE555", registration="A6-MSG",
+            aircraft_type="A320", latitude=25.0, longitude=55.0,
+            baro_altitude=9000.0, velocity=200.0,
+        )
+        self.tracker = AircraftTracker(
+            [FakeSource([state])], DummyDB(), self.store, airports=FakeAirports()
+        )
+        asyncio.run(self.tracker.poll())
+
+    def tearDown(self) -> None:
+        config.settings.ai_report_mode = self._mode
+        config.settings.ai_enabled = self._enabled
+        self.tmp.cleanup()
+
+    def test_both_mode_sends_analysis_then_details(self) -> None:
+        from reporter import build_messages
+
+        config.settings.ai_report_mode = "both"
+        config.settings.ai_enabled = True
+        messages = asyncio.run(build_messages(self.tracker, 60, FakeAnalyzer()))
+        self.assertEqual(len(messages), 2)
+        self.assertIn("نموذج تجريبي", messages[0])
+        self.assertIn("<b>الخلاصة</b>", messages[0])
+        self.assertIn("الملخص التنفيذي", messages[1])
+
+    def test_analysis_only_mode(self) -> None:
+        from reporter import build_messages
+
+        config.settings.ai_report_mode = "analysis"
+        config.settings.ai_enabled = True
+        messages = asyncio.run(build_messages(self.tracker, 60, FakeAnalyzer()))
+        self.assertEqual(len(messages), 1)
+        self.assertIn("الدراسة التحليلية", messages[0])
+
+    def test_off_mode_sends_details_only(self) -> None:
+        from reporter import build_messages
+
+        config.settings.ai_report_mode = "off"
+        messages = asyncio.run(build_messages(self.tracker, 60))
+        self.assertEqual(len(messages), 1)
+        self.assertIn("الملخص التنفيذي", messages[0])
+
+    def test_local_engine_used_when_no_ai(self) -> None:
+        from reporter import build_messages
+
+        config.settings.ai_report_mode = "both"
+        config.settings.ai_enabled = False
+        messages = asyncio.run(build_messages(self.tracker, 60))
+        self.assertEqual(len(messages), 2)
+        self.assertIn("محرّك محلي", messages[0])
+
 
 if __name__ == "__main__":
     unittest.main()

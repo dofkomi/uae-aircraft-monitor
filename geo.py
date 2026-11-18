@@ -29,12 +29,14 @@ class GeoResolver:
         user_agent: str = "uae-aircraft-monitor/1.0 (research)",
         enabled: bool = True,
         shapes: CountryShapes | None = None,
+        nearest_max_km: float | None = None,
     ) -> None:
         self.store = store
         self.airports = airports
         self.user_agent = user_agent
         self.enabled = enabled
         self.shapes = shapes
+        self.nearest_max_km = nearest_max_km
         self._last_call = 0.0
         self._lock = asyncio.Lock()
 
@@ -52,14 +54,18 @@ class GeoResolver:
         # 1) تحديد محلي فوري من حدود الدول
         shapes_ready = self.shapes is not None and self.shapes.ready
         if shapes_ready:
-            name, code, source = self.shapes.lookup(lat, lon)
+            name, code, _ = self.shapes.lookup(lat, lon)
             if name:
                 result = (name, code, "offline")
-        # 2) Nominatim كتحقق عند غياب نتيجة محلية (مثلاً نقطة على حدود/ساحل)
-        if result is None and self.enabled:
+            else:
+                # 2) النقطة خارج البر (فوق المياه أو قرب ساحل): الدولة الأقرب
+                near = self.shapes.nearest(lat, lon, self.nearest_max_km or 200.0)
+                if near:
+                    result = (near[0], near[1], "nearest_country")
+        # 3) Nominatim — فقط إذا لم تتوفر حدود الدول المحلية
+        if result is None and not shapes_ready and self.enabled:
             result = await self._nominatim(lat, lon)
-        # 3) أقرب مطار كحل أخير — فقط إذا لم تتوفر حدود الدول، لأن النقطة
-        #    فوق المياه لا تنتمي لدولة المطار القريب منها.
+        # 4) أقرب مطار كحل أخير — فقط إذا لم تتوفر حدود الدول
         if result is None and not shapes_ready and self.airports is not None:
             result = self._from_airport(lat, lon)
         if result is None:
