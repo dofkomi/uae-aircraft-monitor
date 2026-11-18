@@ -668,23 +668,22 @@ async def build_messages(
     period_minutes: int | None = None,
     analyzer=None,
 ) -> list[str]:
-    """رسائل التقرير الجاهزة للإرسال: دراسة مكتوبة + التقرير المفصّل.
+    """رسالة تليجرام الوحيدة: الدراسة التحليلية المكتوبة.
 
-    الترتيب مقصود: الدراسة التحليلية أولاً (هي المطلوب أساساً)، ثم التفاصيل
-    الكاملة. في وضع ``AI_REPORT_MODE=analysis`` تُرسَل الدراسة وحدها، وفي
-    وضع ``off`` يُرسَل التقرير المفصّل فقط.
+    البيانات التفصيلية لم تعد تُعرض في المحادثة؛ تُولَّد في ملفَّي PDF و DOCX
+    (انظر ``report_docs.send_documents``) مع تقرير 24 ساعة والاستنتاجات.
     """
     from ai_report import build_analysis
 
-    messages: list[str] = []
-    mode = settings.ai_report_mode
-    if mode in {"both", "analysis"}:
-        analysis = await build_analysis(tracker, period_minutes, analyzer)
-        if analysis:
-            messages.append(analysis[0])
-    if mode != "analysis":
-        messages.append(build_report(tracker, period_minutes))
-    return messages or [build_report(tracker, period_minutes)]
+    # رسالة واحدة فقط: الدراسة التحليلية. البيانات التفصيلية لم تعد تُعرض
+    # في تليجرام، بل تُحفظ في ملفَّي PDF و DOCX المرفقين مع كل تقرير.
+    result = await build_analysis(tracker, period_minutes, analyzer)
+    if result:
+        return [result[0]]
+    return [
+        "🧠 <b>الدراسة التحليلية غير مفعّلة</b>\n"
+        "AI_REPORT_MODE=off — التفاصيل الكاملة في ملفَّي PDF و DOCX المرفقين."
+    ]
 
 
 def build_status(tracker: AircraftTracker) -> str:

@@ -75,21 +75,46 @@ async def _send_once() -> None:
             "❌ لا توجد محادثات مسجّلة. أرسل /start للبوت أو حدّد TELEGRAM_CHAT_IDS."
         )
     messages = await build_messages(tracker)
-    async with Bot(settings.telegram_token) as tg:
-        for chat_id in recipients:
-            for message in messages:
-                for part in split_message(message):
-                    await tg.send_message(
-                        chat_id=chat_id,
-                        text=part,
-                        parse_mode="HTML",
-                        disable_web_page_preview=True,
+    # مهلة أوسع: رفع PDF/DOCX يحتاج وقتاً أطول من رسالة نصية، وشبكة السحابة
+    # قد تتأخر في إنشاء الاتصال. نعيد المحاولة فقط إن لم يُرسَل شيء بعد
+    # (حتى لا يصل التقرير مرتين).
+    from telegram.request import HTTPXRequest
+
+    request = HTTPXRequest(connect_timeout=30, read_timeout=120, write_timeout=240)
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        sent = 0
+        try:
+            async with Bot(settings.telegram_token, request=request) as tg:
+                for chat_id in recipients:
+                    for message in messages:
+                        for part in split_message(message):
+                            await tg.send_message(
+                                chat_id=chat_id,
+                                text=part,
+                                parse_mode="HTML",
+                                disable_web_page_preview=True,
+                            )
+                            sent += 1
+                    # نسختان قابلتان للاستغلال: PDF للطباعة وDOCX للتعديل
+                    # (الدراسة + التفاصيل + تقرير 24 ساعة)، والدراسة في تليجرام.
+                    await send_documents(
+                        tg,
+                        chat_id,
+                        tracker,
+                        messages[0] if messages else None,
+                        settings.report_interval_minutes,
                     )
-            # نسختان قابلتان للاستغلال: PDF للطباعة وDOCX للتعديل
-            await send_documents(
-                tg, chat_id, messages, settings.report_interval_minutes
-            )
-    log.info("تم إرسال %d رسالة إلى %d محادثة", len(messages), len(recipients))
+            log.info("تم إرسال %d رسالة إلى %d محادثة", sent, len(recipients))
+            return
+        except Exception as exc:  # noqa: BLE001 - فشل الشبكة لا يفسد الجلب
+            last_error = exc
+            log.warning("فشل الإرسال (محاولة %d/3): %s", attempt, exc)
+            if sent:
+                log.error("أُرسل جزء من التقرير قبل الفشل — لا نعيد المحاولة تفادياً للتكرار")
+                break
+            await asyncio.sleep(5 * attempt)
+    raise SystemExit(f"❌ تعذّر الإرسال إلى تليجرام: {last_error}")
 
 
 def main() -> None:

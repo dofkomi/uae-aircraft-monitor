@@ -36,9 +36,21 @@ from models import AircraftState, LandingEvent, RouteInfo, SignalEvent
 log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-أنت محلّل بيانات طيران محترف يكتب بالعربية الفصحى المبسطة.
+أنت محلّل استخبارات جوية مفتوحة المصدر (OSINT) محترف يكتب بالعربية الفصحى.
 تتلقى لقطة بيانات مرصودة آلياً من شبكات ADS-B التطوعية العامة في منطقة
-الإمارات، وتكتب دراسة تحليلية موجزة لقارئ مهتم بالطيران المدني والعسكري.
+الإمارات، مع إثراء OSINT: المسار المجدول، البث العالمي، والدولة في كل نقطة.
+مهمتك دراسة تحليلية منهجية ومفصّلة — لا سرد بيانات — تنتهي باستنتاجات.
+
+المنهجية الإلزامية (رتّب التحليل على هذا النحو):
+1. نطاق الرصد وجودة البيانات: عدد الطائرات، توزّعها على الدول، صحة المصادر،
+   وأي ثغرة في التغطية تُضعف الاستنتاج.
+2. الحركة الجوية: نمط الارتفاع/الهبوط/الثبات، وأي سلوك غير معتاد.
+3. الطائرات الإماراتية/المستأجرة إماراتياً: أين انقطعت إشارتها (أو الدولة
+   القريبة إن كانت فوق المياه)، وهل ما تزال تبث عالمياً.
+4. الهبوطات والوجهات: قارن الهبوط الفعلي بالمسار المجدول من OSINT.
+5. تقدير الطابع العسكري من مؤشرات مركّبة.
+6. الوجهات غير المبرمجة.
+7. الاستنتاجات: ماذا يعني ذلك عملياً، وما الفرضيات المرجّحة والمستبعدة.
 
 قواعد صارمة:
 1. استخدم فقط الأرقام والأسماء الواردة في البيانات. لا تخترع تسجيلات أو
@@ -46,17 +58,19 @@ SYSTEM_PROMPT = """\
 2. لا تجزم بنوايا الطائرة أو سبب اختفاء الإشارة. البيانات لا تثبت إغلاق
    جهاز التعريف؛ غياب الرصد قد يكون خروجاً من تغطية المستقبلات.
 3. ميّز بوضوح بين: حقيقة مرصودة (من البيانات) واستنتاج محتمل (بكلمة «قد»
-   أو «يُرجّح»).
-4. اهتم أساساً بالطائرات الإماراتية/المستأجرة إماراتياً: أين انقطعت
-   إشارتها (أو الدولة القريبة إن كانت فوق المياه)، وهل ما تزال تبث
-   عالمياً، وهل هبطت في الخارج ثم غيّرت وجهتها.
+   أو «يُرجّح») — وكل استنتاج يجب أن يُسند إلى رقم أو حقل من البيانات.
+4. **لا تكرّر**: كل طائرة أو ظاهرة تُذكر مرة واحدة في المكان الأنسب؛ لا
+   تُعد قائمة الأرقام نفسها في أكثر من قسم. لا تكرّر الجملة الافتتاحية.
 5. اذكر أرقاماً محددة عند الإشارة إلى ظاهرة (مثال: «3 طائرات»).
-6. لا تتجاوز 380 كلمة.
-7. عندما يُطلب منك تقدير الطابع العسكري، استند إلى مؤشرات مركّبة (النوع،
+6. اربط كل قسم بما يسبقه: «بالمقارنة مع…»، «هذا يفسّر…»، «يبقى غير مفسّر…».
+7. لا تتجاوز 650 كلمة.
+8. عندما يُطلب منك تقدير الطابع العسكري، استند إلى مؤشرات مركّبة (النوع،
    المشغّل، النداء، التسجيل، غياب النداء، squawk، نمط الارتفاع/السرعة)
    وأعطِ درجة احتمالية بكلمة (مرجّح/محتمل/مستبعد) — لا تجزم.
-8. رصد الوجهات غير المبرمجة: قارن الهبوط الفعلي بالمسار المجدول وبمطار
+9. رصد الوجهات غير المبرمجة: قارن الهبوط الفعلي بالمسار المجدول وبمطار
    جديد لم تُرصد فيه الطائرة سابقاً، واذكر السبب.
+10. لا تذكر أسماء الحقول الإنجليزية ولا قيم JSON (مثل route_mismatch أو
+    unplanned أو signal_loss_uae)؛ عبّر بالعربية الوصفية فقط.
 
 صيغة الإخراج (تُحوَّل آلياً إلى تنسيق تليجرام):
 ## عنوان قصير
@@ -64,6 +78,27 @@ SYSTEM_PROMPT = """\
 - نقطة
 جملة أو جملتان ختاميتان عن حدود التحليل.
 لا تستخدم جداول ولا رموز Markdown أخرى غير «##» للعناوين و«-» للنقاط.
+"""
+
+DAILY_SYSTEM_PROMPT = """\
+أنت محلّل استخبارات جوية مفتوحة المصدر (OSINT) يكتب تقريراً يومياً بالعربية.
+تتلقى تجميعاً إحصائياً لأحداث آخر 24 ساعة (فقدان إشارة، هبوطات، وجهات غير
+مبرمجة، مؤشرات عسكرية) من شبكات ADS-B التطوعية العامة في منطقة الإمارات.
+
+اكتب تقرير 24 ساعة منهجياً: ما الذي تغيّر فعلاً، وما النمط المتكرر، وما
+الشذوذ، ثم استنتاجات صريحة. القواعد:
+
+1. لا تخترع أرقاماً أو أسماء غير موجودة في البيانات.
+2. لا تجزم بسبب اختفاء الإشارة أو بنيّة الطائرة.
+3. فرّق بين النمط المتكرر (يظهر أكثر من مرة) والحدث المنفرد.
+4. لا تكرّر: اذكر كل رقم مرة واحدة، ولا تُعِد سرد الأحداث نفسها في أكثر من
+   قسم. ابدأ بما هو جديد أو متغيّر، لا بوصف عام.
+5. كل استنتاج يُسند إلى رقم من البيانات (مثال: «5 أحداث فوق عُمان»).
+6. اختم بـ «## الاستنتاجات» مع 3–5 نقاط: ما يؤكد نمطاً، وما يستبعد فرضية،
+   وما يحتاج متابعة.
+7. لا تتجاوز 550 كلمة.
+
+الصيغة: «##» للعناوين و«-» للنقاط فقط.
 """
 
 DEFAULT_MODELS = {
@@ -394,17 +429,46 @@ def build_snapshot(tracker, period_minutes: int | None = None) -> dict:
 def build_user_prompt(snapshot: dict) -> str:
     payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
     return (
-        "هذه لقطة بيانات مرصودة الآن. اكتب دراسة تحليلية عربية موجزة.\n"
-        "ابدأ بـ «## الخلاصة» ثم «## الطائرات الإماراتية» ثم "
+        "هذه لقطة بيانات مرصودة الآن. اكتب دراسة تحليلية عربية منهجية ومفصّلة، "
+        "لا سرداً للبيانات. لا تكرّر رقماً أو طائرة في أكثر من قسم.\n"
+        "الأقسام بهذا الترتيب: «## نطاق الرصد وجودة البيانات» ثم "
+        "«## الحركة الجوية» ثم «## الطائرات الإماراتية» ثم "
         "«## انقطاع الإشارة» ثم «## الهبوطات والوجهات» ثم "
         "«## تقدير الطابع العسكري» ثم «## وجهات غير مبرمجة» ثم "
-        "«## ما يستحق المتابعة».\n"
-        "في «تقدير الطابع العسكري»: استخدم القائمة military_suspects "
-        "(ودرجة local_score كمرجع) وقدّم تقديرك أنت لكل طائرة مع سبب موجز، "
-        "واذكر أن كثيراً من العسكري لا يبث ADS-B أصلاً.\n"
-        "في «وجهات غير مبرمجة»: اذكر الطائرات التي وردت بـ unplanned=true "
-        "مع سبب كل واحدة (مخالفة المسار أو مطار جديد).\n"
+        "«## الاستنتاجات».\n"
+        "«نطاق الرصد»: استخدم totals وcountries_now وsources — كم طائرة، "
+        "وأي دولة تستحوذ على النصيب الأكبر، وهل أي مصدر متعطّل يضعف الثقة.\n"
+        "«انقطاع الإشارة»: استخدم still_broadcasting_globally و"
+        "current_country_global لتقرر: هل الغياب محلي فقط (تغطية) أم توقف فعلي.\n"
+        "«تقدير الطابع العسكري»: استخدم military_suspects وlocal_score كمرجع، "
+        "وقدّم تقديرك أنت لكل طائرة مع سبب موجز، واذكر أن كثيراً من العسكري "
+        "لا يبث ADS-B أصلاً.\n"
+        "«وجهات غير مبرمجة»: الطائرات التي وردت بـ unplanned=true مع سبب كل "
+        "واحدة (مخالفة المسار أو مطار جديد).\n"
+        "«الاستنتاجات»: 3–5 نقاط — ما يؤكد نمطاً، وما يستبعد فرضية، وما يبقى "
+        "غير مفسّر. كل نقطة تُسند إلى رقم.\n"
+        "لا تذكر أسماء الحقول الإنجليزية أو قيم JSON؛ اكتب بالعربية الوصفية "
+        "فقط (مثال: «كل الهبوطات طابقت المسار المجدول» لا «route_mismatch: false»).\n"
         "إن كان قسم بلا بيانات فاكتب سطراً واحداً يوضّح ذلك.\n\n"
+        f"البيانات:\n{payload}"
+    )
+
+
+def build_daily_prompt(snapshot: dict) -> str:
+    """مطالبة تقرير 24 ساعة: تجميع إحصائي + استنتاجات."""
+    payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    return (
+        "هذا تجميع أحداث آخر 24 ساعة. اكتب تقرير 24 ساعة عربياً منهجياً.\n"
+        "الأقسام: «## حصيلة اليوم» ثم «## الأنماط المتكررة» ثم "
+        "«## الشذوذ» ثم «## الطائرات والوجهات» ثم «## الاستنتاجات».\n"
+        "«حصيلة اليوم»: الأرقام الكلية مرة واحدة فقط (أحداث، هبوطات، غير "
+        "مبرمجة) دون تكرارها لاحقاً.\n"
+        "«الأنماط المتكررة»: ما تكرّر أكثر من مرة (دولة، مطار، مشغّل) مع "
+        "العدد.\n"
+        "«الشذوذ»: ما ظهر مرة واحدة ويستحق الانتباه.\n"
+        "«الاستنتاجات»: 3–5 نقاط صريحة، كل واحدة مسندة إلى رقم، تفصل بين "
+        "ما تأكد وما استُبعد وما يحتاج متابعة.\n"
+        "لا تكرّر السرد ولا تذكر الرقم الإجمالي أكثر من مرة.\n\n"
         f"البيانات:\n{payload}"
     )
 
@@ -445,18 +509,24 @@ class AIAnalyzer:
         )
         return f"{self.provider.name} · {model}"
 
-    async def analyze(self, snapshot: dict) -> str | None:
+    async def analyze(
+        self,
+        snapshot: dict,
+        prompt: str | None = None,
+        system: str | None = None,
+    ) -> str | None:
         """يجرّب النماذج المرشّحة بالترتيب حتى ينجح أحدها.
 
-        بعض النماذج الجديدة تُرجع استجابة فارغة أو 404/503 رغم ظهورها في
-        قائمة النماذج، لذا لا نعتمد على اسم واحد بل ننتقل تلقائياً للبديل.
+        ``prompt``/``system`` يتيحان استخدام نفس العميل لتقرير 24 ساعة
+        (تعليمات مختلفة) دون تغيير المنطق.
         """
         if not self.provider:
             return None
-        prompt = build_user_prompt(snapshot)
+        prompt = prompt or build_user_prompt(snapshot)
+        system = system or SYSTEM_PROMPT
         for model in await self._candidates():
             try:
-                raw = await self._call(model, prompt)
+                raw = await self._call(model, prompt, system)
             except Exception as exc:  # noqa: BLE001 - لا نُفشل التقرير بسبب النموذج
                 self.last_error = str(exc)[:300]
                 log.warning("فشل استدعاء النموذج %s: %s", model, exc)
@@ -520,13 +590,14 @@ class AIAnalyzer:
                 names.append(name)
         return names
 
-    async def _call(self, model: str, prompt: str) -> str | None:
+    async def _call(self, model: str, prompt: str, system: str | None = None) -> str | None:
         provider = self.provider
+        system = system or SYSTEM_PROMPT
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if provider.kind == "gemini":
             url = f"{provider.base_url}/models/{model}:generateContent?key={provider.api_key}"
             body = {
-                "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+                "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                 "generationConfig": {
                     "temperature": settings.ai_temperature,
@@ -542,7 +613,7 @@ class AIAnalyzer:
             body = {
                 "model": model,
                 "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": prompt},
                 ],
                 "temperature": settings.ai_temperature,
@@ -596,15 +667,12 @@ def build_local_analysis(snapshot: dict) -> str:
     landings = snapshot.get("landings") or []
     other_events = snapshot.get("signal_loss_other_count") or 0
     emergencies = snapshot.get("emergencies") or []
+    sources = snapshot.get("sources") or []
 
-    lines = ["## الخلاصة"]
+    lines = ["## نطاق الرصد وجودة البيانات"]
     lines.append(
-        f"- رُصدت {totals.get('aircraft_now', 0)} طائرة الآن داخل نطاق المراقبة، "
+        f"- رُصدت {totals.get('aircraft_now', 0)} طائرة داخل نطاق المراقبة، "
         f"منها {totals.get('airborne', 0)} في الجو و{totals.get('on_ground', 0)} على الأرض."
-    )
-    lines.append(
-        f"- التصنيف: عسكرية {totals.get('military', 0)} · مدنية "
-        f"{totals.get('civilian', 0)} · غير مصنّفة {totals.get('unknown', 0)}."
     )
     if countries:
         top = "، ".join(
@@ -614,21 +682,46 @@ def build_local_analysis(snapshot: dict) -> str:
             for item in countries[:4]
         )
         lines.append(f"- أبرز دول المواقع الحالية: {top}.")
+    down = [item.get("name") for item in sources if not item.get("ok")]
+    if down:
+        lines.append(
+            f"- ⚠️ مصادر متعطّلة الآن: {'، '.join(str(name) for name in down)} — "
+            "التغطية أضعف من المعتاد، والغياب قد يكون سببه المصدر لا الطائرة."
+        )
+    else:
+        lines.append(f"- كل المصادر ({len(sources)}) تعمل، فالتغطية متماسكة لهذه الدورة.")
+
+    lines.append("## الحركة الجوية")
+    alt = totals.get("avg_alt_ft")
+    speed = totals.get("avg_speed_kts")
+    lines.append(
+        f"- متوسط الارتفاع {alt:,} قدم ومتوسط السرعة {speed} عقدة."
+        if alt and speed
+        else "- لا تتوفر قيم ارتفاع/سرعة كافية لحساب متوسط موثوق."
+    )
     if emergencies:
         lines.append(f"- 🚨 أكواد طوارئ مرصودة: {', '.join(emergencies)}.")
+    else:
+        lines.append("- لا أكواد طوارئ (7500/7600/7700) في هذه الدورة.")
 
+    # نستثني من قائمة «الآن» ما سيُذكر في قسم انقطاع الإشارة لتفادي التكرار
+    lost_callsigns = {str(item.get("callsign")) for item in uae_events}
+    airborne_uae = [
+        item for item in uae_states
+        if str(item.get("callsign")) not in lost_callsigns
+    ]
     lines.append("## الطائرات الإماراتية")
-    if uae_states:
-        for item in uae_states[:6]:
+    if airborne_uae:
+        for item in airborne_uae[:6]:
             route = f" — مسار {item['route']}" if item.get("route") else ""
-            alt = f" · {item['alt_ft']:,} قدم" if item.get("alt_ft") else ""
+            alt_txt = f" · {item['alt_ft']:,} قدم" if item.get("alt_ft") else ""
             water = " (فوق المياه قرب الساحل)" if item.get("near_water") else ""
             lines.append(
                 f"- {item['callsign']} ({item.get('type') or 'نوع غير معروف'}) "
-                f"في {item['country']}{water}{alt}{route}."
+                f"في {item['country']}{water}{alt_txt}{route}."
             )
     else:
-        lines.append("- لا توجد طائرات إماراتية مرصودة في هذه اللحظة.")
+        lines.append("- لا توجد طائرات إماراتية إضافية مرصودة خارج قائمة الانقطاع.")
 
     lines.append("## انقطاع الإشارة")
     if uae_events:
@@ -688,26 +781,39 @@ def build_local_analysis(snapshot: dict) -> str:
     else:
         lines.append("- لا توقّفات في مطارات جديدة أو مخالفة للمسار خلال الفترة.")
 
-    lines.append("## ما يستحق المتابعة")
-    followups = 0
-    if uae_events:
-        lines.append("- مراقبة الطائرات التي انقطعت إشارتها محلياً وتحقّق البث العالمي لاحقاً.")
-        followups += 1
-    if any(item.get("divergence") for item in landings):
-        lines.append("- هبوطات خارجية تلتها وجهات غير إماراتية تستحق مراجعة المسار المجدول.")
-        followups += 1
+    lines.append("## الاستنتاجات")
+    conclusions = 0
     if any(item.get("still_broadcasting_globally") for item in uae_events):
         lines.append(
-            "- طائرات ما تزال تبث عالمياً: غيابها محلياً سببه تغطية المستقبلات لا إغلاق البث."
+            "- الغياب المحلي لبعض الطائرات سببه **تغطية المستقبلات** لا إغلاق البث: "
+            "ما تزال تُرصد عالمياً."
         )
-        followups += 1
-    if any(item.get("unplanned") for item in landings):
-        lines.append("- توقّفات في مطارات جديدة أو مخالفة للمسار: تُستحق مراجعة سبب التحويل.")
-        followups += 1
-    if not followups:
+        conclusions += 1
+    if uae_events and not any(item.get("still_broadcasting_globally") for item in uae_events):
         lines.append(
-            "- لا مؤشرات غير معتادة في هذه الفترة؛ يُنصح بمقارنة الدورات القادمة "
-            "لرصد أي تغيّر في نمط المسارات أو انقطاع الإشارة."
+            "- كل أحداث الانقطاع بلا رصد عالمي مطابق — يُرجّح توقف فعلي عن البث "
+            "أو خروجاً كاملاً من تغطية الشبكة، ويحتاج متابعة الدورة القادمة."
+        )
+        conclusions += 1
+    if unplanned:
+        lines.append(
+            f"- {len(unplanned)} توقّف في مطار غير معتاد: مؤشر على تحويل مسار "
+            "أو رحلة غير مجدولة، لا إثبات لنيّة."
+        )
+        conclusions += 1
+    if any(item.get("divergence") for item in landings):
+        lines.append("- هبوطات خارجية تلتها وجهات غير إماراتية تستحق مراجعة المسار المجدول.")
+        conclusions += 1
+    if down:
+        lines.append(
+            "- ثغرة تغطية هذه الدورة تُضعف الثقة بالاستنتاجات؛ يُستحسن مقارنة "
+            "الدورة القادمة قبل استخلاص نمط."
+        )
+        conclusions += 1
+    if not conclusions:
+        lines.append(
+            "- لا شذوذ إحصائي في هذه الدورة: الأرقام ضمن النمط المعتاد، "
+            "ولا حاجة إلى إجراء."
         )
     lines.append(
         "التحليل مبني على بيانات ADS-B العامة فقط، ولا يثبت إغلاق جهاز التعريف "

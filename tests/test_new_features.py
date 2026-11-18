@@ -145,6 +145,78 @@ class DocumentTests(unittest.TestCase):
             self.assertTrue(docx.exists() and docx.stat().st_size > 1000)
             self.assertEqual(pdf.read_bytes()[:4], b"%PDF")
 
+    def test_document_contains_hourly_and_daily_parts(self) -> None:
+        """المستند يجمع: دراسة ساعية + تفاصيل + استنتاجات 24 ساعة + تفاصيلها."""
+        from docx import Document
+
+        from report_docs import build_documents
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = build_documents(
+                "<b>تفاصيل الساعة</b>\n• سطر",
+                "<b>الدراسة</b>\n• نص",
+                "<b>استنتاجات اليوم</b>\n• نص",
+                "<b>تفاصيل اليوم</b>\n• نص",
+                out_dir=Path(tmp),
+            )
+            text = "\n".join(p.text for p in Document(str(paths["docx"])).paragraphs)
+            self.assertIn("الدراسة التحليلية", text)
+            self.assertIn("البيانات التفصيلية", text)
+            self.assertIn("استنتاجات 24 ساعة", text)
+            self.assertIn("تقرير 24 ساعة", text)
+            self.assertIn("المحتويات", text)
+
+
+class DailyReportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self.tmp.name) / "daily.db")
+        self.tracker = AircraftTracker(
+            [FakeSource([])], DummyDB(), self.store, airports=FakeAirports()
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_snapshot_is_empty_but_well_formed(self) -> None:
+        from daily import build_daily_snapshot
+
+        snap = build_daily_snapshot(self.tracker, 24)
+        self.assertEqual(snap["hours"], 24)
+        self.assertEqual(snap["totals"]["events"], 0)
+        self.assertEqual(snap["totals"]["landings"], 0)
+        self.assertIn("from", snap["window"])
+
+    def test_report_has_totals_and_source_quality(self) -> None:
+        from daily import build_daily_report
+
+        report = build_daily_report(self.tracker, 24)
+        self.assertIn("تقرير 24 ساعة", report)
+        self.assertIn("الحصيلة الرقمية", report)
+        self.assertIn("جودة المصادر", report)
+
+    def test_local_analysis_ends_with_conclusions(self) -> None:
+        from daily import build_daily_local_analysis, build_daily_snapshot
+
+        text = build_daily_local_analysis(build_daily_snapshot(self.tracker, 24))
+        self.assertIn("## حصيلة اليوم", text)
+        self.assertIn("## الاستنتاجات", text)
+
+    def test_daily_analysis_falls_back_to_local_engine(self) -> None:
+        import config
+        from daily import build_daily_analysis
+
+        old_enabled, old_mode = config.settings.ai_enabled, config.settings.ai_report_mode
+        try:
+            config.settings.ai_enabled = False
+            config.settings.ai_report_mode = "both"
+            html_text, source = asyncio.run(build_daily_analysis(self.tracker, hours=24))
+        finally:
+            config.settings.ai_enabled, config.settings.ai_report_mode = old_enabled, old_mode
+        self.assertEqual(source, "local")
+        self.assertIn("استنتاجات 24 ساعة", html_text)
+        self.assertIn("الاستنتاجات", html_text)
+
 
 if __name__ == "__main__":
     unittest.main()

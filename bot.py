@@ -269,7 +269,11 @@ class ReportBot:
                         log.warning("تعذّر الإرسال إلى %s: %s", chat_id, exc)
             try:
                 await send_documents(
-                    context.bot, chat_id, messages, settings.report_interval_minutes
+                    context.bot,
+                    chat_id,
+                    self.tracker,
+                    messages[0] if messages else None,
+                    settings.report_interval_minutes,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("تعذّر إرسال ملفات التقرير إلى %s: %s", chat_id, exc)

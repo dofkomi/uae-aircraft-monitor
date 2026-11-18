@@ -682,9 +682,11 @@ class AiReportTests(unittest.TestCase):
 
         snapshot = build_snapshot(self._tracker(), 60)
         text = build_local_analysis(snapshot)
-        self.assertIn("## الخلاصة", text)
+        self.assertIn("## نطاق الرصد وجودة البيانات", text)
+        self.assertIn("## الحركة الجوية", text)
         self.assertIn("## الطائرات الإماراتية", text)
         self.assertIn("## انقطاع الإشارة", text)
+        self.assertIn("## الاستنتاجات", text)
         self.assertIn("UAE123", text)
         self.assertIn("ADS-B", text)
 
@@ -722,16 +724,18 @@ class ReportMessagesTests(unittest.TestCase):
         config.settings.ai_enabled = self._enabled
         self.tmp.cleanup()
 
-    def test_both_mode_sends_analysis_then_details(self) -> None:
+    def test_telegram_receives_analysis_only(self) -> None:
+        """تليجرام: الدراسة التحليلية وحدها — لا بيانات تفصيلية."""
         from reporter import build_messages
 
         config.settings.ai_report_mode = "both"
         config.settings.ai_enabled = True
         messages = asyncio.run(build_messages(self.tracker, 60, FakeAnalyzer()))
-        self.assertEqual(len(messages), 2)
+        self.assertEqual(len(messages), 1)
         self.assertIn("نموذج تجريبي", messages[0])
         self.assertIn("<b>الخلاصة</b>", messages[0])
-        self.assertIn("الملخص التنفيذي", messages[1])
+        # البيانات التفصيلية انتقلت إلى PDF/DOCX فقط
+        self.assertNotIn("الملخص التنفيذي", messages[0])
 
     def test_analysis_only_mode(self) -> None:
         from reporter import build_messages
@@ -742,13 +746,15 @@ class ReportMessagesTests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertIn("الدراسة التحليلية", messages[0])
 
-    def test_off_mode_sends_details_only(self) -> None:
+    def test_off_mode_reports_where_details_are(self) -> None:
         from reporter import build_messages
 
         config.settings.ai_report_mode = "off"
         messages = asyncio.run(build_messages(self.tracker, 60))
         self.assertEqual(len(messages), 1)
-        self.assertIn("الملخص التنفيذي", messages[0])
+        self.assertIn("غير مفعّلة", messages[0])
+        self.assertIn("PDF", messages[0])
+        self.assertNotIn("الملخص التنفيذي", messages[0])
 
     def test_local_engine_used_when_no_ai(self) -> None:
         from reporter import build_messages
@@ -756,7 +762,7 @@ class ReportMessagesTests(unittest.TestCase):
         config.settings.ai_report_mode = "both"
         config.settings.ai_enabled = False
         messages = asyncio.run(build_messages(self.tracker, 60))
-        self.assertEqual(len(messages), 2)
+        self.assertEqual(len(messages), 1)
         self.assertIn("محرّك محلي", messages[0])
 
 
