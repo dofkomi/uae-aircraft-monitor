@@ -64,6 +64,7 @@ class AirportDB:
         self.cache_path = Path(cache_path)
         self.url = url
         self.airports: list[Airport] = []
+        self._by_ident: dict[str, Airport] = {}
         self._load()
 
     def _load(self) -> None:
@@ -91,6 +92,17 @@ class AirportDB:
         except (OSError, csv.Error) as exc:
             log.warning("تعذّر تحميل المطارات: %s", exc)
         log.info("تم تحميل %d مطاراً من %s", len(self.airports), self.cache_path.name)
+        self._by_ident = {
+            airport.ident.upper(): airport
+            for airport in self.airports
+            if airport.ident
+        }
+
+    def by_ident(self, ident: str | None) -> Airport | None:
+        """يبحث عن مطار برمزه (ICAO/IATA) — يُستخدم لتصنيف المهبط."""
+        if not ident:
+            return None
+        return self._by_ident.get(str(ident).upper())
 
     def _download(self) -> str:
         """تنزيل لمرة واحدة عبر المكتبة القياسية (يعمل داخل أو خارج حدث async)."""

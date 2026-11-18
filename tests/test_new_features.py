@@ -44,6 +44,9 @@ class FakeAirports:
         ]
         return matches[0] if matches else None
 
+    def by_ident(self, ident):
+        return next((a for a in self.AIRPORTS if a.ident == ident), None)
+
 
 class MilitaryPredictionTests(unittest.TestCase):
     def test_known_fighter_is_confident_military(self) -> None:
@@ -126,6 +129,227 @@ class UnplannedDestinationTests(unittest.TestCase):
         report = build_report(tracker, 60)
         self.assertIn("وجهات غير مبرمجة", report)
         self.assertIn("تنبؤ الطابع العسكري", report)
+
+
+class SahelAnomalyTests(unittest.TestCase):
+    """نطاق الساحل الأفريقي، محرّك الشذوذ، ومصفوفة الاستخبارات."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self.tmp.name) / "sahel.db")
+        self.tracker = AircraftTracker(
+            [FakeSource([])], DummyDB(), self.store, airports=FakeAirports()
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_scope_names_the_eight_sahel_states_only(self) -> None:
+        from sahel import sahel_scope_text
+
+        text = sahel_scope_text()
+        for name in ("موريتانيا", "مالي", "بوركينا فاسو", "النيجر", "تشاد",
+                     "السودان", "إريتريا", "السنغال"):
+            self.assertIn(name, text)
+        # دول العبور ليست ساحلاً
+        self.assertNotIn("نيجيريا", text)
+        self.assertNotIn("ليبيا", text)
+
+    def test_zone_classification(self) -> None:
+        from sahel import zone_at
+
+        self.assertEqual(zone_at(14.5, -4.0, "ML"), "sahel")
+        self.assertEqual(zone_at(13.5, 2.1, "NE"), "sahel")
+        self.assertEqual(zone_at(None, None, "NG"), "transit")
+        self.assertEqual(zone_at(15.0, 40.0, None), "maritime")  # البحر الأحمر
+        self.assertIsNone(zone_at(48.8, 2.3, "FR"))
+
+    def test_geometry_flags_deviation_and_impossible_speed(self) -> None:
+        from sahel import _deviation_km, _teleport_kmh
+
+        straight = [(10.0, 0.0), (11.0, 0.0), (12.0, 0.0), (13.0, 0.0)]
+        self.assertLess(_deviation_km(straight), 1.0)
+
+        detour = [(10.0, 0.0), (11.0, 5.0), (12.0, 4.0), (13.0, 0.0)]
+        self.assertGreater(_deviation_km(detour), 150)
+
+        jump = [(10.0, 0.0, 0), (20.0, 20.0, 600)]  # ~2400 كم في 10 دقائق
+        self.assertGreater(_teleport_kmh(jump), 1500)
+
+    def test_blackout_over_sahel_raises_the_score(self) -> None:
+        from datetime import datetime, timezone
+
+        from models import SignalEvent
+        from sahel import assess_aircraft
+
+        event = SignalEvent(
+            icao24="a1b2c3",
+            callsign="UAE777",
+            classification="civilian",
+            last_seen=datetime.now(timezone.utc),
+            last_lat=15.3,
+            last_lon=-3.0,
+            registration="A6-XXX",
+            country="مالي",
+            country_code="ML",
+        )
+        result = assess_aircraft(self.tracker, "a1b2c3", [event], [], None)
+        self.assertGreaterEqual(result.score, 0.30)
+        self.assertTrue(any("الساحل" in item for item in result.indicators))
+        self.assertIn(result.confidence, ("منخفضة", "متوسطة", "مرتفعة"))
+
+    def test_global_broadcast_discounts_the_blackout(self) -> None:
+        from datetime import datetime, timezone
+
+        from models import SignalEvent
+        from sahel import assess_aircraft
+
+        event = SignalEvent(
+            icao24="d4e5f6", callsign="UAE888", classification="civilian",
+            last_seen=datetime.now(timezone.utc), last_lat=15.3, last_lon=-3.0,
+            country="مالي", country_code="ML", still_broadcasting=True,
+            global_country="النيجر",
+        )
+        result = assess_aircraft(self.tracker, "d4e5f6", [event], [], None)
+        self.assertTrue(
+            any("تغطية" in item for item in result.indicators),
+            "غياب محلي مع بث عالمي يجب أن يُفسَّر كثغرة تغطية",
+        )
+
+    def test_matrix_row_has_the_nine_fields_and_visual_links(self) -> None:
+        from datetime import datetime, timezone
+
+        from models import SignalEvent
+        from sahel import MATRIX_FIELDS, build_matrix
+
+        self.tracker.recent_events = [
+            SignalEvent(
+                icao24="a1b2c3", callsign="UAE777", classification="civilian",
+                last_seen=datetime.now(timezone.utc), last_lat=15.3, last_lon=-3.0,
+                registration="A6-XXX", country="مالي", country_code="ML",
+            )
+        ]
+        rows = build_matrix(self.tracker, 24)
+        self.assertEqual(len(rows), 1)
+        data = rows[0].as_dict()
+        for _, label in MATRIX_FIELDS:
+            self.assertIn(label, data)
+        self.assertIn("apps.sentinel-hub.com", data["Sentinel_EO_Browser"])
+        self.assertIn("google.com", data["Google_Earth"])
+        self.assertEqual(data["Real_Leasing_Layer"], rows[0].leasing_layer)
+        self.assertIn("غير محدد", rows[0].leasing_layer)
+
+    def test_matrix_translates_airport_kind_and_labels_entry(self) -> None:
+        from datetime import datetime, timezone
+
+        from models import LandingEvent
+        from sahel import build_matrix
+
+        self.store.add_landing(
+            LandingEvent(
+                icao24="fed789", callsign="UAE557", registration="A6-DB3",
+                classification="civilian", uae_related=True,
+                airport_ident="FTTJ", airport_name="نجامينا",
+                airport_country_code="TD", at=datetime.now(timezone.utc),
+                latitude=12.13, longitude=15.04, new_airport=True,
+                unplanned=True,
+            )
+        )
+        rows = build_matrix(self.tracker, 24)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertIn("مطار إقليمي متوسط", row.landing)  # لا «medium_airport»
+        self.assertIn("الساحل", row.entry_point)
+        self.assertEqual(row.zone_key, "sahel")
+        # داخل نطاق الساحل يبقى الصف حتى لو كانت درجته دون العتبة
+        self.assertLess(row.score, 20)
+
+    def test_csv_export_writes_the_schema(self) -> None:
+        from datetime import datetime, timezone
+
+        from models import SignalEvent
+        from sahel import build_matrix, export_csv
+
+        self.tracker.recent_events = [
+            SignalEvent(
+                icao24="a1b2c3", callsign="UAE777", classification="civilian",
+                last_seen=datetime.now(timezone.utc), last_lat=15.3, last_lon=-3.0,
+                country="مالي", country_code="ML",
+            )
+        ]
+        path = export_csv(build_matrix(self.tracker, 24), Path(self.tmp.name) / "m.csv")
+        text = path.read_text(encoding="utf-8-sig")
+        self.assertIn("Flight_Hex", text)
+        self.assertIn("Confidence_Level", text)
+
+    def test_report_has_sahel_scope_and_matrix(self) -> None:
+        from reporter import build_report
+
+        report = build_report(self.tracker, 60)
+        self.assertIn("نطاق الساحل الأفريقي", report)
+        self.assertIn("مصفوفة الاستخبارات", report)
+        self.assertIn("موريتانيا", report)
+
+    def test_local_analysis_covers_abnormal_routes(self) -> None:
+        from ai_report import build_local_analysis, build_snapshot
+
+        text = build_local_analysis(build_snapshot(self.tracker, 60))
+        self.assertIn("## المسارات غير الطبيعية ونطاق الساحل", text)
+
+    def test_window_reads_events_from_database_after_restart(self) -> None:
+        """الذاكرة فارغة في كل تشغيل سحابي: النافذة يجب أن تقرأ من القاعدة."""
+        from datetime import datetime, timedelta, timezone
+
+        from models import SignalEvent
+        from sahel import build_matrix
+
+        self.store.add_event(
+            SignalEvent(
+                icao24="abc123", callsign="UAE555", classification="civilian",
+                last_seen=datetime.now(timezone.utc), last_lat=15.3, last_lon=-3.0,
+                registration="A6-DB1", country="مالي", country_code="ML",
+            )
+        )
+        fresh = AircraftTracker(
+            [FakeSource([])], DummyDB(), self.store, airports=FakeAirports()
+        )
+        self.assertEqual(fresh.recent_events, [])  # ذاكرة جديدة فارغة
+
+        events = fresh.events_since(datetime.now(timezone.utc) - timedelta(hours=24))
+        self.assertEqual([event.icao24 for event in events], ["abc123"])
+        self.assertEqual(events[0].country_code, "ML")
+
+        rows = build_matrix(fresh, 24)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].registration, "A6-DB1")
+        self.assertTrue(rows[0].sentinel_url)
+
+    def test_window_reads_landings_from_database_after_restart(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from models import LandingEvent
+
+        self.store.add_landing(
+            LandingEvent(
+                icao24="def456", callsign="UAE556", registration="A6-DB2",
+                classification="civilian", uae_related=True,
+                airport_ident="FTTJ", airport_name="نجامينا",
+                airport_country_code="TD", at=datetime.now(timezone.utc),
+                latitude=12.13, longitude=15.04, new_airport=True,
+                unplanned=True,
+            )
+        )
+        fresh = AircraftTracker(
+            [FakeSource([])], DummyDB(), self.store, airports=FakeAirports()
+        )
+        self.assertEqual(fresh.recent_landings, [])
+
+        landings = fresh.landings_since(
+            datetime.now(timezone.utc) - timedelta(hours=24)
+        )
+        self.assertEqual([item.icao24 for item in landings], ["def456"])
+        self.assertEqual(landings[0].airport_country_code, "TD")
+        self.assertTrue(landings[0].unplanned)
 
 
 class DocumentTests(unittest.TestCase):

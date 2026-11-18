@@ -94,8 +94,25 @@ def build_daily_snapshot(tracker, hours: int = 24) -> dict:
             suspects.append(result)
     suspects.sort(key=lambda item: item["score"], reverse=True)
 
+    sahel = {}
+    try:
+        from sahel import build_matrix, sahel_scope_text, summarise
+
+        matrix = build_matrix(tracker, hours)
+        scope = summarise(tracker, hours, rows=matrix)
+        sahel = {
+            "scope": sahel_scope_text(),
+            "events_by_zone": scope["events_by_zone"],
+            "landings_by_zone": scope["landings_by_zone"],
+            "flagged": scope["flagged"],
+            "top": scope["top"],
+        }
+    except Exception as exc:  # noqa: BLE001 - التقرير اليومي يكفي بدونه
+        log.warning("تعذّر بناء ملخّص الساحل اليومي: %s", exc)
+
     return {
         "hours": hours,
+        "sahel": sahel,
         "window": {
             "from": since.strftime("%Y-%m-%d %H:%M"),
             "to": now.strftime("%Y-%m-%d %H:%M"),
@@ -334,6 +351,42 @@ def build_daily_report(tracker, hours: int = 24) -> str:
         lines.append("  • لا مؤشرات كافية في اللحظة الحالية.")
     lines.append("")
 
+    sahel = snap.get("sahel") or {}
+    lines.append("🌍 <b>نطاق الساحل الأفريقي والمسارات غير الطبيعية</b>")
+    if sahel:
+        lines.append(f"  <i>نطاق التركيز: {_esc(sahel['scope'])}.</i>")
+        if sahel.get("events_by_zone"):
+            lines.append(
+                "  • انقطاعات ضمن نطاق المتابعة: "
+                + " · ".join(
+                    f"{_esc(item['zone'])} ({item['count']})"
+                    for item in sahel["events_by_zone"]
+                )
+            )
+        if sahel.get("landings_by_zone"):
+            lines.append(
+                "  • هبوطات ضمن نطاق المتابعة: "
+                + " · ".join(
+                    f"{_esc(item['zone'])} ({item['count']})"
+                    for item in sahel["landings_by_zone"]
+                )
+            )
+        lines.append(f"  • طائرات تجاوزت عتبة الشذوذ: <b>{sahel.get('flagged', 0)}</b>")
+        for item in (sahel.get("top") or [])[:5]:
+            reasons = "؛ ".join(item.get("indicators") or []) or "مؤشرات محدودة"
+            lines.append(
+                f"  • <b>{_esc(item['aircraft'])}</b> ({_esc(item.get('registration'))}) — "
+                f"{item['score']}% · ثقة {_esc(item['confidence'])} · "
+                f"{_esc(item['zone'])} · {_esc(reasons)}"
+            )
+        lines.append(
+            "  <i>المصفوفة الكاملة بالحقول التسعة وروابط Sentinel-2 في قسم "
+            "البيانات التفصيلية.</i>"
+        )
+    else:
+        lines.append("  • تعذّر بناء تحليل الساحل لهذه الفترة.")
+    lines.append("")
+
     down = [item["name"] for item in snap["sources"] if not item["ok"]]
     lines.append("🛰️ <b>جودة المصادر خلال الفترة</b>")
     if down:
@@ -417,6 +470,28 @@ def build_daily_local_analysis(snapshot: dict) -> str:
         )
     if not snapshot["uae_events"] and not snapshot["military_suspects"]:
         lines.append("- لا أحداث إماراتية ولا مؤشرات عسكرية بارزة في هذه الفترة.")
+
+    lines.append("## الساحل والمسارات غير الطبيعية")
+    sahel = snapshot.get("sahel") or {}
+    if sahel and sahel.get("flagged"):
+        top = sahel.get("top") or []
+        lines.append(f"- {sahel['flagged']} طائرة تجاوزت عتبة الشذوذ داخل النطاق.")
+        if top:
+            best = top[0]
+            lines.append(
+                f"- أعلى شذوذ: {best['aircraft']} ({best.get('registration')}) "
+                f"{best['score']}% بثقة {best['confidence']} — "
+                + ("؛ ".join(best.get("indicators") or []) or "مؤشرات محدودة")
+                + "."
+            )
+        lines.append(
+            "- الدرجة تجميع مؤشرات مستقلة؛ لا تُثبت نيّة ولا إغلاقاً متعمداً، "
+            "و«طبقة التأجير» تبقى غير محددة بلا سجلات عقود."
+        )
+    elif sahel:
+        lines.append("- لا طائرة تجاوزت عتبة الشذوذ داخل نطاق الساحل اليوم.")
+    else:
+        lines.append("- تعذّر بناء تحليل الساحل لهذه الفترة.")
 
     lines.append("## الاستنتاجات")
     lines.append(

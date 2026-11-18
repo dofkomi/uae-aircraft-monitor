@@ -6,11 +6,11 @@ import logging
 import sqlite3
 import time
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
-from models import AircraftState, LandingEvent, SignalEvent
+from models import AircraftState, LandingEvent, SignalEvent, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -397,6 +397,17 @@ class Store:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def sightings_for(self, icao24: str, since_ts: int, limit: int = 500) -> list[dict]:
+        """مسار طائرة مرتّب زمنياً — يُستخدم لتحليل هندسة المسار (انحراف/قفزات)."""
+        with self._tx() as conn:
+            rows = conn.execute(
+                "SELECT seen_at, lat, lon, altitude_ft FROM sightings "
+                "WHERE icao24 = ? AND seen_at >= ? AND lat IS NOT NULL AND lon IS NOT NULL "
+                "ORDER BY seen_at ASC LIMIT ?",
+                (icao24, since_ts, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def get_geo(self, key: str) -> dict | None:
         with self._tx() as conn:
             row = conn.execute("SELECT * FROM geo_cache WHERE key = ?", (key,)).fetchone()
@@ -498,3 +509,83 @@ class Store:
                 "signal_events": conn.execute("SELECT COUNT(*) FROM signal_events").fetchone()[0],
                 "landings": conn.execute("SELECT COUNT(*) FROM landings").fetchone()[0],
             }
+
+
+# ----------------------------------------------------------------------
+# محوّلات الصف → كائن
+# ----------------------------------------------------------------------
+def _dt(value) -> "datetime | None":
+    """يحوّل طابعاً زمنياً يونكس (ثوان) إلى datetime بتوقيت UTC."""
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def event_from_row(row: dict) -> SignalEvent:
+    """يبني ``SignalEvent`` من صف جدول ``signal_events``.
+
+    ضروري في التشغيل السحابي: كل دورة تبدأ بذاكرة فارغة، فقراءة الأحداث من
+    القاعدة هي الطريقة الوحيدة لبناء تقرير الـ24 ساعة ومصفوفة الساحل.
+    """
+    from osint import route_from_json
+
+    return SignalEvent(
+        icao24=row.get("icao24") or "",
+        callsign=row.get("callsign"),
+        classification=row.get("classification") or "unknown",
+        last_seen=_dt(row.get("last_seen")) or utcnow(),
+        last_lat=row.get("lat"),
+        last_lon=row.get("lon"),
+        registration=row.get("registration"),
+        reason=row.get("reason") or "unknown",
+        country=row.get("country"),
+        country_code=row.get("country_code"),
+        nearest_airport=row.get("nearest_airport"),
+        nearest_airport_name=row.get("nearest_airport_name"),
+        nearest_airport_country=row.get("nearest_airport_country"),
+        nearest_airport_km=row.get("nearest_airport_km"),
+        last_alt_ft=row.get("last_alt_ft"),
+        last_speed_kts=row.get("last_speed_kts"),
+        last_track=row.get("last_track"),
+        last_on_ground=bool(row.get("last_on_ground")),
+        last_source=row.get("last_source") or "",
+        geo_source=row.get("geo_source") or "",
+        route=route_from_json(row.get("route_json")),
+        still_broadcasting=bool(row.get("still_broadcasting")),
+        global_country=row.get("global_country"),
+        global_country_code=row.get("global_country_code"),
+        global_last_seen=_dt(row.get("global_last_seen")),
+        created_at=_dt(row.get("created_at")) or utcnow(),
+    )
+
+
+def landing_from_row(row: dict) -> LandingEvent:
+    """يبني ``LandingEvent`` من صف جدول ``landings`` (نفس سبب ``event_from_row``)."""
+    from osint import route_from_json
+
+    return LandingEvent(
+        icao24=row.get("icao24") or "",
+        callsign=row.get("callsign"),
+        registration=row.get("registration"),
+        classification=row.get("classification") or "unknown",
+        uae_related=bool(row.get("uae_related")),
+        airport_ident=row.get("airport_ident"),
+        airport_name=row.get("airport_name"),
+        airport_country_code=row.get("airport_country"),
+        at=_dt(row.get("at")) or utcnow(),
+        latitude=row.get("lat"),
+        longitude=row.get("lon"),
+        from_airport=row.get("from_airport"),
+        from_airport_name=row.get("from_airport_name"),
+        from_country_code=row.get("from_country"),
+        from_at=_dt(row.get("from_at")),
+        leg_minutes=row.get("leg_minutes"),
+        leg_distance_km=row.get("leg_distance_km"),
+        divergence=bool(row.get("divergence")),
+        route=route_from_json(row.get("route_json")),
+        new_airport=bool(row.get("new_airport")),
+        unplanned=bool(row.get("unplanned")),
+    )

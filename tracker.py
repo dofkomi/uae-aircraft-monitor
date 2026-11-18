@@ -19,6 +19,8 @@ log = logging.getLogger(__name__)
 
 KNOWN_RETENTION = timedelta(hours=6)
 MAX_RECENT_EVENTS = 200
+# سقف قراءة النافذة الزمنية من القاعدة (24 ساعة قد تحوي مئات الأحداث)
+DB_WINDOW_LIMIT = 1000
 MAX_GEOCODE_PER_POLL = 8
 MAX_ROUTES_PER_POLL = 12
 MAX_OSINT_EVENTS_PER_POLL = 8
@@ -490,10 +492,50 @@ class AircraftTracker:
         return "no_broadcast"
 
     def events_since(self, since: datetime) -> list[SignalEvent]:
-        return [event for event in self.recent_events if event.created_at >= since]
+        """أحداث فقدان الإشارة داخل النافذة: الذاكرة + قاعدة البيانات.
+
+        في التشغيل السحابي تبدأ الذاكرة فارغة في كل دورة، فقراءة القاعدة
+        ضرورية وإلا بقي تقرير الـ24 ساعة ومصفوفة الساحل فارغين دائماً.
+        """
+        from store import event_from_row
+
+        merged: dict[tuple[str, int], SignalEvent] = {}
+        for event in self.recent_events:
+            if event.created_at >= since:
+                merged[(event.icao24, int(event.last_seen.timestamp()))] = event
+        try:
+            rows = self.store.events_since(
+                int(since.timestamp()), limit=DB_WINDOW_LIMIT
+            )
+        except Exception as exc:  # noqa: BLE001 - لا نُسقط التقرير بسبب القاعدة
+            log.warning("تعذّرت قراءة أحداث فقدان الإشارة من القاعدة: %s", exc)
+            rows = []
+        for row in rows:
+            event = event_from_row(row)
+            merged.setdefault((event.icao24, int(event.last_seen.timestamp())), event)
+        return sorted(merged.values(), key=lambda item: item.created_at)
 
     def landings_since(self, since: datetime) -> list[LandingEvent]:
-        return [item for item in self.recent_landings if item.at >= since]
+        """هبوطات النافذة: الذاكرة + قاعدة البيانات (نفس سبب ``events_since``)."""
+        from store import landing_from_row
+
+        merged: dict[tuple[str, int, str], LandingEvent] = {}
+        for item in self.recent_landings:
+            if item.at >= since:
+                merged[(item.icao24, int(item.at.timestamp()), item.airport_ident or "")] = item
+        try:
+            rows = self.store.landings_since(
+                int(since.timestamp()), limit=DB_WINDOW_LIMIT
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("تعذّرت قراءة الهبوطات من القاعدة: %s", exc)
+            rows = []
+        for row in rows:
+            item = landing_from_row(row)
+            merged.setdefault(
+                (item.icao24, int(item.at.timestamp()), item.airport_ident or ""), item
+            )
+        return sorted(merged.values(), key=lambda item: item.at)
 
     def counts(self) -> dict[str, int]:
         counts = {"military": 0, "civilian": 0, "unknown": 0}

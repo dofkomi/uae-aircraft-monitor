@@ -639,6 +639,70 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         )
         lines.append(f"🔤 <b>أكثر نداءات الاستدعاء</b>: {top}\n")
 
+    # ── نطاق الساحل الأفريقي والمسارات غير الطبيعية ──
+    from sahel import build_matrix, sahel_scope_text, summarise
+
+    matrix = build_matrix(tracker, 24)
+    scope = summarise(tracker, 24, rows=matrix)
+    lines.append("🛰️ <b>نطاق الساحل الأفريقي والمسارات غير الطبيعية</b>")
+    lines.append(f"  <i>نطاق التركيز: {_esc(sahel_scope_text())}.</i>")
+    if scope["events_by_zone"]:
+        lines.append(
+            "  <u>انقطاعات ضمن نطاق المتابعة (الساحل ودول العبور والممرات):</u> "
+            + " · ".join(
+                f"{_esc(item['zone'])} ({item['count']})"
+                for item in scope["events_by_zone"]
+            )
+        )
+    else:
+        lines.append("  • لا انقطاعات مرصودة داخل نطاق المتابعة خلال 24 ساعة.")
+    if scope["landings_by_zone"]:
+        lines.append(
+            "  <u>هبوطات ضمن نطاق المتابعة:</u> "
+            + " · ".join(
+                f"{_esc(item['zone'])} ({item['count']})"
+                for item in scope["landings_by_zone"]
+            )
+        )
+    lines.append(
+        f"  <u>طائرات تجاوزت عتبة الشذوذ:</u> <b>{scope['flagged']}</b> "
+        "من أصل ما رُصد داخل النطاق أو المرتبط بالإمارات."
+    )
+    lines.append("")
+
+    lines.append("🧾 <b>مصفوفة الاستخبارات — الحقول التسعة</b>")
+    if matrix:
+        for index, row in enumerate(matrix, start=1):
+            lines.append(
+                f"  <b>{index}) {_esc(row.icao24.upper())} · "
+                f"{_esc(row.registration)}</b> — درجة الشذوذ "
+                f"<b>{row.score}%</b> · ثقة {_esc(row.confidence)} · {_esc(row.zone)}"
+            )
+            lines.append(f"      • المشغّل المعلن: {_esc(row.operator)}")
+            lines.append(f"      • طبقة التأجير الفعلية: {_esc(row.leasing_layer)}")
+            lines.append(f"      • نقطة الدخول إلى الساحل: {_esc(row.entry_point)}")
+            lines.append(f"      • إحداثيات الانقطاع: {_esc(row.blackout)}")
+            lines.append(f"      • مهبط الهبوط: {_esc(row.landing)}")
+            lines.append(
+                "      • المؤشرات: "
+                + ("؛ ".join(_esc(item) for item in row.indicators) or "—")
+            )
+            if row.sentinel_url:
+                lines.append(f"      • تحقّق بصري (Sentinel-2): {_esc(row.sentinel_url)}")
+            if row.earth_url:
+                lines.append(f"      • Google Earth: {_esc(row.earth_url)}")
+            lines.append("")
+        lines.append(
+            "  <i>مستوى الثقة يُشتق من عدد المؤشرات المستقلة لا من حجم الدرجة. "
+            "«طبقة التأجير الفعلية» لا تكشفها بيانات ADS-B العامة؛ تبقى غير محددة "
+            "حتى تُقابل بسجلات الطيران والعقود.</i>"
+        )
+    else:
+        lines.append(
+            "  • لا طائرة تجاوزت عتبة الشذوذ (20%) خلال 24 ساعة داخل النطاق."
+        )
+    lines.append("")
+
     # ── حالة المصادر ──
     source_parts = []
     for source in tracker.sources:
