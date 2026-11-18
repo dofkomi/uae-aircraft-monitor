@@ -11,6 +11,7 @@ from aircraft_db import AircraftDB
 from airports import AirportDB
 from bot import ReportBot
 from config import settings
+from country_shapes import CountryShapes
 from geo import GeoResolver
 from reporter import build_report
 from secure_logging import setup_logging
@@ -28,11 +29,16 @@ def build_tracker() -> AircraftTracker:
     store = Store(settings.db_path)
     aircraft_db = AircraftDB(store)
     airports = AirportDB(settings.airports_cache_path)
+    shapes = CountryShapes(
+        cache_path=settings.countries_path,
+        enabled=settings.use_offline_country,
+    )
     geo = GeoResolver(
         store=store,
         airports=airports,
         user_agent=settings.nominatim_user_agent,
         enabled=settings.use_geocoding,
+        shapes=shapes,
     )
     return AircraftTracker(sources, aircraft_db, store, geo=geo, airports=airports)
 

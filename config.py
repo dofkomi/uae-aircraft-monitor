@@ -65,6 +65,10 @@ class Settings:
 
         # تحديد الدولة والمطارات
         self.use_geocoding: bool = _as_bool("USE_GEOCODING", True)
+        self.use_offline_country: bool = _as_bool("USE_OFFLINE_COUNTRY", True)
+        self.countries_path: Path = Path(
+            os.getenv("COUNTRIES_GEOJSON_PATH", "data/countries.geojson")
+        )
         self.nominatim_user_agent: str = os.getenv(
             "NOMINATIM_USER_AGENT", "uae-aircraft-monitor/1.0 (research)"
         )
@@ -97,6 +101,7 @@ class Settings:
         self.db_path: Path = Path(os.getenv("DB_PATH", "data/aircraft.db"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.airports_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.countries_path.parent.mkdir(parents=True, exist_ok=True)
 
     @property
     def bbox(self) -> tuple[float, float, float, float]:

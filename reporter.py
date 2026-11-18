@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from airports import country_name, haversine_km
 from classifier import is_uae_related, label
 from config import settings
+from country_shapes import default_shapes, flag_emoji
 from models import AircraftState, LandingEvent, SignalEvent
 from tracker import AircraftTracker
 
@@ -109,6 +110,14 @@ def _fmt_pos(lat: float | None, lon: float | None) -> str:
     return f"{abs(lat):.4f}°{ns} {abs(lon):.4f}°{ew}"
 
 
+def _country_text(lat: float | None, lon: float | None) -> str:
+    """اسم الدولة (مع العلم) من حدود محلية — بديل عرض الإحداثيات وحدها."""
+    try:
+        return default_shapes().country_label(lat, lon)
+    except Exception:  # noqa: BLE001 - لا نُفشل التقرير بسبب خريطة تالفة
+        return "—"
+
+
 def _squawk_tag(squawk: str | None) -> str:
     if not squawk:
         return ""
@@ -158,7 +167,8 @@ def _aircraft_detail(
     lines = [
         f"  • <b>{name}</b> [{_esc(label(classification))}]{flags}"
         + (f" · {ident_text}" if ident_text else ""),
-        f"    📍 {position} · 🧭 {_compass(state.true_track)}",
+        f"    🌍 {_esc(_country_text(state.latitude, state.longitude))}"
+        f" · 📍 {position} · 🧭 {_compass(state.true_track)}",
         f"    ⛰️ {alt_text} · ⚡ {_fmt_speed(state.speed_kts)} "
         f"· ↕️ {vrate_text}",
         f"    📡 {_esc(source)} · 🕐 آخر إشارة {contact}{_squawk_tag(state.squawk)}",
@@ -167,11 +177,15 @@ def _aircraft_detail(
 
 
 def _event_detail(event: SignalEvent, now: datetime) -> str:
-    country = event.country or "دولة غير محددة"
+    country = event.country or _country_text(event.last_lat, event.last_lon)
+    if country in ("—", ""):
+        country = "دولة غير محددة"
+    flag = flag_emoji(event.country_code) if event.country_code else ""
+    country_label_text = f"{flag} {country}".strip()
     name = event.callsign or event.icao24
     lines = [
         f"  • <b>{_esc(name)}</b> [{_esc(label(event.classification))}] — "
-        f"<b>{_esc(country)}</b>",
+        f"<b>{_esc(country_label_text)}</b>",
         f"    🕐 آخر ظهور {_fmt_time(event.last_seen)} ({_ago(event.last_seen, now)}) "
         f"· 📍 {_fmt_pos(event.last_lat, event.last_lon)}",
         f"    ⛰️ {_fmt_alt(event.last_alt_ft)} · ⚡ {_fmt_speed(event.last_speed_kts)} "
@@ -343,6 +357,31 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         for item in highlights:
             lines.append(f"  • {item}")
         lines.append("")
+
+    # ── توزيع الطائرات الحالية حسب الدولة (تحديد محلي بلا استهلاك حصة) ──
+    state_countries: Counter[str] = Counter()
+    for state in states:
+        if state.latitude is None or state.longitude is None:
+            state_countries["📍 بدون موقع معروف"] += 1
+            continue
+        label_text = _country_text(state.latitude, state.longitude)
+        if label_text == "—":
+            label_text = "📍 دولة غير محددة"
+        state_countries[label_text] += 1
+
+    # ── التركيز الأساسي: الدولة التي انقطع فيها الإشارة ──
+    lines.append("🗺️ <b>توزيع الطائرات الحالية حسب الدولة</b>")
+    if state_countries:
+        for country, count in state_countries.most_common(12):
+            lines.append(
+                f"  • {_esc(country)}: <b>{count}</b> طائرة "
+                f"({_percent(count, len(states))})"
+            )
+        if len(state_countries) > 12:
+            lines.append(f"  … و {len(state_countries) - 12} دولة أخرى")
+    else:
+        lines.append("  • لا توجد طائرات مرصودة حالياً.")
+    lines.append("")
 
     # ── التركيز الأساسي: الدولة التي انقطع فيها الإشارة ──
     lines.append("🌍 <b>الدول التي انقطع فيها الإشارة (التركيز الرئيسي)</b>")
@@ -516,6 +555,8 @@ def build_status(tracker: AircraftTracker) -> str:
         f"  • قاعدة البيانات: {db_stats['sightings']} رصد، "
         f"{db_stats['signal_events']} انقطاع، {db_stats['landings']} هبوط",
         f"  • تحديد الدولة: {'مفعّل' if (tracker.geo and tracker.geo.enabled) else 'معطّل'}",
+        f"  • حدود الدول المحلية: "
+        f"{'جاهزة' if (tracker.geo and tracker.geo.shapes and tracker.geo.shapes.ready) else 'غير متاحة'}",
         "",
         "🔌 <b>المصادر</b>",
     ]

@@ -375,5 +375,59 @@ class ClassifierTests(unittest.TestCase):
         self.assertFalse(is_uae_related(state3))
 
 
+class CountryShapeTests(unittest.TestCase):
+    """تحديد الدولة من الإحداثيات محلياً (Natural Earth) بلا شبكة."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from country_shapes import CountryShapes
+
+        path = Path(__file__).resolve().parents[1] / "data" / "countries.geojson"
+        cls.shapes = CountryShapes(cache_path=path)
+        if not cls.shapes.ready:
+            raise unittest.SkipTest("data/countries.geojson غير موجود")
+
+    def test_united_arab_emirates(self) -> None:
+        name, code, source = self.shapes.lookup(24.45, 54.37)  # أبوظبي
+        self.assertEqual(code, "AE")
+        self.assertEqual(source, "offline")
+        self.assertIn("الإمارات", name or "")
+
+    def test_neighbours(self) -> None:
+        self.assertEqual(self.shapes.lookup(23.60, 58.50)[1], "OM")  # مسقط
+        self.assertEqual(self.shapes.lookup(24.70, 46.70)[1], "SA")  # الرياض
+        self.assertEqual(self.shapes.lookup(35.70, 51.40)[1], "IR")  # طهران
+
+    def test_open_sea_has_no_country(self) -> None:
+        # بحر العرب — بعيد عن أي حدود برية
+        name, code, source = self.shapes.lookup(15.0, 65.0)
+        self.assertIsNone(name)
+        self.assertIsNone(code)
+        self.assertEqual(source, "unknown")
+
+    def test_label_and_flag(self) -> None:
+        from country_shapes import flag_emoji
+
+        self.assertEqual(flag_emoji("AE"), "🇦🇪")
+        self.assertEqual(flag_emoji(""), "")
+        self.assertIn("الإمارات", self.shapes.country_label(24.45, 54.37))
+        self.assertIn("المياه", self.shapes.country_label(15.0, 65.0))
+
+    def test_geo_resolver_prefers_offline_without_network(self) -> None:
+        from geo import GeoResolver
+
+        tmp = tempfile.TemporaryDirectory()
+        store = Store(Path(tmp.name) / "geo.db")
+        # enabled=False يمنع Nominatim؛ airports=None لن يُستخدم لأن التحديد المحلي ينجح
+        resolver = GeoResolver(store=store, airports=None, enabled=False, shapes=self.shapes)
+        country, code, source = asyncio.run(resolver.lookup(24.45, 54.37))
+        self.assertEqual(code, "AE")
+        self.assertEqual(source, "offline")
+        # النتيجة تُخزَّن مؤقتاً في قاعدة البيانات
+        key = f"{24.45:.1f},{54.37:.1f}"
+        self.assertIsNotNone(store.get_geo(key))
+        tmp.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()

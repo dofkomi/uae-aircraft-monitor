@@ -1,8 +1,7 @@
 """تحديد الدولة التي كان فوقها آخر إشارة للطائرة.
 
-المصدر الأساسي: Nominatim Reverse Geocoding التابع لـ OpenStreetMap
-(مجاني، بلا مفتاح API، يسمح بطلب واحد كل ثانية تقريباً).
-بديل محلي: أقرب مطار من قاعدة OurAirports إذا تعذّر الاتصال.
+الترتيب: حدود الدول المحلية (Natural Earth) → Nominatim إن لزم → أقرب مطار.
+التحديد المحلي سريع ولا يستهلك حصة أي خدمة، ويُستخدم لدولة كل طائرة في التقرير.
 """
 from __future__ import annotations
 
@@ -13,6 +12,7 @@ from datetime import datetime, timezone
 import aiohttp
 
 from airports import AirportDB, country_name
+from country_shapes import CountryShapes
 from store import Store
 
 log = logging.getLogger(__name__)
@@ -28,11 +28,13 @@ class GeoResolver:
         airports: AirportDB,
         user_agent: str = "uae-aircraft-monitor/1.0 (research)",
         enabled: bool = True,
+        shapes: CountryShapes | None = None,
     ) -> None:
         self.store = store
         self.airports = airports
         self.user_agent = user_agent
         self.enabled = enabled
+        self.shapes = shapes
         self._last_call = 0.0
         self._lock = asyncio.Lock()
 
@@ -47,10 +49,21 @@ class GeoResolver:
             return cached["country"], cached["country_code"], cached["source"]
 
         result: tuple[str | None, str | None, str] | None = None
-        if self.enabled:
+        # 1) تحديد محلي فوري من حدود الدول
+        shapes_ready = self.shapes is not None and self.shapes.ready
+        if shapes_ready:
+            name, code, source = self.shapes.lookup(lat, lon)
+            if name:
+                result = (name, code, "offline")
+        # 2) Nominatim كتحقق عند غياب نتيجة محلية (مثلاً نقطة على حدود/ساحل)
+        if result is None and self.enabled:
             result = await self._nominatim(lat, lon)
-        if result is None:
+        # 3) أقرب مطار كحل أخير — فقط إذا لم تتوفر حدود الدول، لأن النقطة
+        #    فوق المياه لا تنتمي لدولة المطار القريب منها.
+        if result is None and not shapes_ready and self.airports is not None:
             result = self._from_airport(lat, lon)
+        if result is None:
+            result = (None, None, "unknown")
 
         if result[0]:
             self.store.save_geo(
