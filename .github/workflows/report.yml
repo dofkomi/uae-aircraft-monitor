@@ -37,6 +37,7 @@ jobs:
           path: |
             data/aircraft.db
             data/last-send.txt
+            data/last-daily.txt
           key: uae-monitor-db-${{ github.run_id }}
           restore-keys: uae-monitor-db-
 

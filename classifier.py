@@ -227,6 +227,17 @@ def label(classification: str) -> str:
     )
 
 
+def _icao24_int(value: str | None) -> int | None:
+    """يحوّل رمز ICAO24 السادس عشري إلى عدد صحيح (أو ``None`` إن كان غير صالح)."""
+    raw = (value or "").strip().lower()
+    if not raw:
+        return None
+    try:
+        return int(raw, 16)
+    except ValueError:
+        return None
+
+
 def _uae_match(
     icao24: str | None,
     callsign: str | None,
@@ -242,6 +253,10 @@ def _uae_match(
     text = f"{model or ''} {manufacturer or ''}".lower()
 
     if (icao24 or "").lower() in settings.uae_watch_icao24:
+        return True
+    # النطاق الوطني الإماراتي: يلتقط الطائرات التي تُخفي تسجيلها أو نداءها.
+    code = _icao24_int(icao24)
+    if code is not None and settings.uae_icao24_min <= code <= settings.uae_icao24_max:
         return True
     if registration_text.startswith("A6-"):
         return True

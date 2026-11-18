@@ -358,7 +358,7 @@ def _military_suspects(tracker, states: list[AircraftState]) -> list[dict]:
                 "type": state.aircraft_type,
                 "callsign": state.callsign,
                 "registration": state.registration,
-                "operator": state.operator,
+                "operator": state.origin_country,
                 "alt_ft": state.altitude_ft,
                 "speed_kts": state.speed_kts,
                 "on_ground": state.on_ground,
@@ -390,6 +390,7 @@ def _sahel_block(tracker) -> dict:
         "flagged": scope["flagged"],
         "coverage_exits": scope.get("coverage_exits", 0),
         "top": scope["top"],
+        "matrix": [row.as_dict() for row in matrix],
         "note": (
             "الدرجة تجميع مؤشرات مستقلة، والثقة تُشتق من عددها لا من حجم الرقم. "
             "لا تُثبت نيّة ولا إغلاقاً متعمداً لجهاز التعريف."
@@ -942,6 +943,26 @@ async def build_analysis(
         return None
     snapshot = build_snapshot(tracker, period_minutes)
 
+    # 1) خطّ النماذج الثلاثي: Groq (تصفية) → Gemini (استدلال) → OpenRouter (تدقيق).
+    #    لا يُنشر أي تحليل غير مُدقَّق؛ أي فشل يُرجع None فنتابع للبديل.
+    if settings.llm_pipeline_enabled:
+        try:
+            from pipeline import run_analysis
+
+            result = await run_analysis(snapshot, tracker=tracker, kind="hourly")
+        except Exception as exc:  # noqa: BLE001 - الطبقة العليا لا تفشل التقرير
+            log.warning("تعذّر خطّ النماذج المتعدّد: %s", exc)
+            result = None
+        if result is not None:
+            text = format_ai_text(result.text)
+            if text:
+                return (
+                    f"{AI_REPORT_TITLE}\n"
+                    f"<i>المصدر: {html.escape(result.source)}</i>\n\n{text}",
+                    result.source,
+                )
+
+    # 2) المزوّد الواحد القديم (متوافق مع الإعداد السابق).
     if settings.ai_enabled:
         analyzer = analyzer or AIAnalyzer()
         if analyzer.available:

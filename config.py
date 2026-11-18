@@ -30,6 +30,17 @@ def _as_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _as_hex_int(name: str, default: str) -> int:
+    """يقرأ قيمة سادسة عشرية (مثل نطاق ICAO24) مع تجاهل ``0x``."""
+    raw = os.getenv(name, default).strip().lower()
+    if raw.startswith("0x"):
+        raw = raw[2:]
+    try:
+        return int(raw, 16)
+    except ValueError:
+        return int(default, 16)
+
+
 class Settings:
     """كل الإعدادات في مكان واحد، مع قيم افتراضية آمنة."""
 
@@ -110,6 +121,11 @@ class Settings:
             for value in os.getenv("UAE_WATCH_ICAO24", "").split(",")
             if value.strip()
         )
+        # النطاق الوطني الإماراتي في ICAO 24-bit (0x896000–0x896FFF افتراضاً).
+        # كل رمز داخل هذا النطاق طائرة مسجّلة في الإمارات ولو لم يُعلن تسجيلها،
+        # وهذا يمنع ضياع الطائرات التي تُخفي نداءها أو تسجيلها.
+        self.uae_icao24_min: int = _as_hex_int("UAE_ICAO24_MIN", "896000")
+        self.uae_icao24_max: int = _as_hex_int("UAE_ICAO24_MAX", "896FFF")
 
         # ── إثراء OSINT مجاني (بلا مفاتيح) ──
         self.osint_enabled: bool = _as_bool("OSINT_ENABLED", True)
@@ -134,6 +150,31 @@ class Settings:
         self.gemini_api_key: str = os.getenv("GEMINI_API_KEY", "").strip()
         self.groq_api_key: str = os.getenv("GROQ_API_KEY", "").strip()
         self.openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "").strip()
+
+        # ── توجيه المهام بين ثلاثة مزوّدين مجانيين ──
+        # خطّ المعالجة: Groq (تصفية) → Gemini (استدلال) → OpenRouter (تدقيق).
+        self.llm_pipeline_enabled: bool = _as_bool("LLM_PIPELINE_ENABLED", True)
+        self.groq_model: str = (
+            os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
+            or "openai/gpt-oss-120b"
+        )
+        self.gemini_model: str = (
+            os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
+            or "gemini-3.1-flash-lite"
+        )
+        self.openrouter_model: str = (
+            os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3.5-lightning:free").strip()
+            or "nvidia/nemotron-3.5-lightning:free"
+        )
+        self.llm_stage_timeout: int = max(20, _as_int("LLM_STAGE_TIMEOUT_SECONDS", 90))
+        self.llm_max_tokens: int = max(600, _as_int("LLM_MAX_TOKENS", 2400))
+        self.llm_min_interval: float = max(0.0, _as_float("LLM_MIN_INTERVAL_SECONDS", 1.5))
+        self.llm_cooldown_seconds: int = max(60, _as_int("LLM_COOLDOWN_SECONDS", 900))
+        self.llm_daily_calls: int = max(10, _as_int("LLM_DAILY_CALLS", 400))
+
+        # إيقاع التقارير: مستند كل ساعة، ومستند 24 ساعة مرة واحدة يومياً.
+        self.daily_guard_hours: float = max(1.0, _as_float("DAILY_GUARD_HOURS", 23.0))
+        self.daily_report_hours: int = max(1, _as_int("DAILY_REPORT_HOURS", 24))
 
         # التخزين
         self.db_path: Path = Path(os.getenv("DB_PATH", "data/aircraft.db"))

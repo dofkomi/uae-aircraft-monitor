@@ -131,6 +131,65 @@ class Store:
                     ok      INTEGER,
                     message TEXT
                 );
+                -- سجل دائم لنقاط إخفاء التعريف (Part B): يبقى بعد نهاية التشغيل
+                -- ويُجمَّع شبكياً لاحقاً لكشف المهابط المتكرّرة في الساحل.
+                CREATE TABLE IF NOT EXISTS blackout_points (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    icao24       TEXT NOT NULL,
+                    registration TEXT,
+                    observed_at  INTEGER NOT NULL,
+                    lat          REAL NOT NULL,
+                    lon          REAL NOT NULL,
+                    country      TEXT,
+                    country_code TEXT,
+                    zone         TEXT,
+                    grid_lat     REAL,
+                    grid_lon     REAL,
+                    reason       TEXT,
+                    dedup_key    TEXT UNIQUE,
+                    created_at   INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_blackout_time
+                    ON blackout_points(observed_at);
+                CREATE TABLE IF NOT EXISTS landing_sites (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    icao24        TEXT NOT NULL,
+                    registration  TEXT,
+                    observed_at   INTEGER NOT NULL,
+                    lat           REAL,
+                    lon           REAL,
+                    airport_ident TEXT,
+                    airport_name  TEXT,
+                    country       TEXT,
+                    country_code  TEXT,
+                    zone          TEXT,
+                    grid_lat      REAL,
+                    grid_lon      REAL,
+                    dedup_key     TEXT UNIQUE,
+                    created_at    INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_landing_sites_time
+                    ON landing_sites(observed_at);
+                -- تدقيق كل طائرة بواسطة نموذج ثانٍ (عمود Audited_By_Model).
+                CREATE TABLE IF NOT EXISTS llm_audit (
+                    icao24  TEXT NOT NULL,
+                    day     TEXT NOT NULL,
+                    model   TEXT,
+                    verdict TEXT,
+                    note    TEXT,
+                    at      INTEGER NOT NULL,
+                    PRIMARY KEY (icao24, day)
+                );
+                -- ميزانية الطبقة المجانية: عدد استدعاءات كل مزوّد في اليوم.
+                CREATE TABLE IF NOT EXISTS llm_calls (
+                    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    at       INTEGER NOT NULL,
+                    provider TEXT,
+                    role     TEXT,
+                    ok       INTEGER,
+                    note     TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_llm_calls_time ON llm_calls(at);
                 """
             )
             self._migrate(conn)
@@ -529,6 +588,7 @@ class Store:
                 ("signal_events", "created_at"),
                 ("landings", "at"),
                 ("poll_log", "at"),
+                ("llm_calls", "at"),
             ):
                 conn.execute(f"DELETE FROM {table} WHERE {column} < ?", (cutoff,))
 
@@ -540,6 +600,107 @@ class Store:
                 "signal_events": conn.execute("SELECT COUNT(*) FROM signal_events").fetchone()[0],
                 "landings": conn.execute("SELECT COUNT(*) FROM landings").fetchone()[0],
             }
+
+    # ---------- سجل الساحل (Part B): نقاط الانقطاع والمهابط ----------
+    def add_blackout_point(self, row: dict) -> bool:
+        """يضيف نقطة انقطاع؛ ``False`` إن كانت مكرّرة (نفس مفتاح الإزالة)."""
+        with self._tx() as conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO blackout_points "
+                "(icao24, registration, observed_at, lat, lon, country, country_code, "
+                " zone, grid_lat, grid_lon, reason, dedup_key, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row["icao24"], row.get("registration"), int(row["observed_at"]),
+                    float(row["lat"]), float(row["lon"]), row.get("country"),
+                    row.get("country_code"), row.get("zone"), row.get("grid_lat"),
+                    row.get("grid_lon"), row.get("reason"), row["dedup_key"],
+                    int(time.time()),
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def add_landing_site(self, row: dict) -> bool:
+        """يضيف مهبط هبوط؛ ``False`` إن كان مكرّراً."""
+        with self._tx() as conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO landing_sites "
+                "(icao24, registration, observed_at, lat, lon, airport_ident, "
+                " airport_name, country, country_code, zone, grid_lat, grid_lon, "
+                " dedup_key, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row["icao24"], row.get("registration"), int(row["observed_at"]),
+                    row.get("lat"), row.get("lon"), row.get("airport_ident"),
+                    row.get("airport_name"), row.get("country"),
+                    row.get("country_code"), row.get("zone"), row.get("grid_lat"),
+                    row.get("grid_lon"), row["dedup_key"], int(time.time()),
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def blackout_points_since(self, since_ts: int, limit: int = 2000) -> list[dict]:
+        with self._tx() as conn:
+            rows = conn.execute(
+                "SELECT * FROM blackout_points WHERE observed_at >= ? "
+                "ORDER BY observed_at DESC LIMIT ?",
+                (since_ts, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def landing_sites_since(self, since_ts: int, limit: int = 2000) -> list[dict]:
+        with self._tx() as conn:
+            rows = conn.execute(
+                "SELECT * FROM landing_sites WHERE observed_at >= ? "
+                "ORDER BY observed_at DESC LIMIT ?",
+                (since_ts, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    # ---------- تدقيق النماذج وميزانية الطبقة المجانية ----------
+    def record_audit(
+        self, icao24: str, day: str, model: str, verdict: str = "", note: str = ""
+    ) -> None:
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO llm_audit (icao24, day, model, verdict, note, at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(icao24, day) DO UPDATE SET model=excluded.model, "
+                "verdict=excluded.verdict, note=excluded.note, at=excluded.at",
+                (icao24.lower(), day, model, verdict[:40], note[:300], int(time.time())),
+            )
+
+    def audit_for(self, icao24: str, day: str | None = None) -> dict | None:
+        query = "SELECT * FROM llm_audit WHERE icao24 = ?"
+        params: list = [icao24.lower()]
+        if day:
+            query += " AND day = ?"
+            params.append(day)
+        query += " ORDER BY at DESC LIMIT 1"
+        with self._tx() as conn:
+            row = conn.execute(query, tuple(params)).fetchone()
+            return dict(row) if row else None
+
+    def record_llm_call(self, provider: str, role: str, ok: bool, note: str = "") -> None:
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO llm_calls (at, provider, role, ok, note) VALUES (?, ?, ?, ?, ?)",
+                (int(time.time()), provider, role, int(ok), note[:300]),
+            )
+
+    def llm_calls_today(self, provider: str | None = None) -> int:
+        start = int(
+            datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).timestamp()
+        )
+        query = "SELECT COUNT(*) FROM llm_calls WHERE at >= ?"
+        params: list = [start]
+        if provider:
+            query += " AND provider = ?"
+            params.append(provider)
+        with self._tx() as conn:
+            return int(conn.execute(query, tuple(params)).fetchone()[0])
 
 
 # ----------------------------------------------------------------------

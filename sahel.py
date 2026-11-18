@@ -418,15 +418,40 @@ def _airport_kind(tracker, ident: str | None) -> str:
 # ── 4. مصفوفة الاستخبارات ───────────────────────────────────────────────────
 MATRIX_FIELDS = [
     ("hex", "Flight_Hex"),
+    ("msn", "MSN"),
     ("registration", "Registration"),
     ("operator", "Declared_Operator"),
     ("leasing_layer", "Real_Leasing_Layer"),
+    ("origin", "Origin"),
     ("entry_point", "Entry_Point_Sahel"),
     ("blackout", "Blackout_LatLong"),
     ("landing", "Landing_Airfield"),
+    ("score", "Anomaly_Score"),
     ("indicators", "Anomaly_Indicators"),
     ("confidence", "Confidence_Level"),
+    ("audited_by", "Audited_By_Model"),
+    ("dedup_key", "Dedup_Key"),
 ]
+
+# ADS-B العام لا يحمل الرقم التسلسلي للمصنع (MSN)؛ نعلن ذلك بدل تخمينه.
+MSN_UNAVAILABLE = "غير متوفر — ADS-B العام لا يحمل MSN"
+AUDIT_PENDING = "غير مُدقَّق"
+
+
+def dedup_key(icao24: str | None, moment, label: str = "") -> str:
+    """مفتاح إزالة التكرار ``[ICAO_Hex + Date + Entry_FIR_Timestamp]``."""
+    hex_code = (icao24 or "unknown").strip().lower()
+    if isinstance(moment, datetime):
+        stamp = int(moment.timestamp())
+        day = moment.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    elif isinstance(moment, (int, float)):
+        stamp = int(moment)
+        day = datetime.fromtimestamp(stamp, tz=timezone.utc).strftime("%Y-%m-%d")
+    else:
+        stamp = 0
+        day = "1970-01-01"
+    suffix = f"|{label}" if label else ""
+    return f"{hex_code}|{day}|{stamp}{suffix}"
 
 LEASING_CAVEAT = (
     "غير محدد — سجل ADS-B العام يكشف المشغّل المعلن فقط، وسلسلة التأجير "
@@ -454,7 +479,7 @@ def airport_kind_ar(kind: str | None) -> str:
 
 @dataclass
 class MatrixRow:
-    """صف واحد في مصفوفة الاستخبارات بالحقول التسعة المطلوبة."""
+    """صف واحد في مصفوفة الاستخبارات (Part A) بالحقول المطلوبة."""
 
     icao24: str
     registration: str
@@ -470,19 +495,27 @@ class MatrixRow:
     sentinel_url: str
     earth_url: str
     zone_key: str = ""
+    msn: str = MSN_UNAVAILABLE
+    origin: str = "غير محدد"
+    audited_by: str = AUDIT_PENDING
+    dedup_key: str = ""
 
     def as_dict(self) -> dict:
         return {
             "Flight_Hex": self.icao24.upper(),
+            "MSN": self.msn,
             "Registration": self.registration,
             "Declared_Operator": self.operator,
             "Real_Leasing_Layer": self.leasing_layer,
+            "Origin": self.origin,
             "Entry_Point_Sahel": self.entry_point,
             "Blackout_LatLong": self.blackout,
             "Landing_Airfield": self.landing,
+            "Anomaly_Score": self.score,
             "Anomaly_Indicators": "؛ ".join(self.indicators),
             "Confidence_Level": self.confidence,
-            "Anomaly_Score": self.score,
+            "Audited_By_Model": self.audited_by,
+            "Dedup_Key": self.dedup_key,
             "Zone": self.zone,
             "Sentinel_EO_Browser": self.sentinel_url,
             "Google_Earth": self.earth_url,
@@ -514,9 +547,17 @@ def _fmt_point(lat: float | None, lon: float | None) -> str:
 
 
 def build_matrix(
-    tracker, hours: int = 24, limit: int = 12, min_score: float = 0.20
+    tracker,
+    hours: int = 24,
+    limit: int = 12,
+    min_score: float = 0.20,
+    uae_only: bool = True,
 ) -> list[MatrixRow]:
-    """يبني مصفوفة الاستخبارات مرتّبة بدرجة الشذوذ (الأعلى أولاً)."""
+    """يبني مصفوفة الاستخبارات مرتّبة بدرجة الشذوذ (الأعلى أولاً).
+
+    ``uae_only=True`` (الافتراضي) يحصر المصفوفة في الطائرات الإماراتية/
+    المستأجرة إماراتياً. البوت متخصّص فيها وحدها؛ غيرها إحصاء سياقي فقط.
+    """
     from classifier import is_uae_related_event
 
     now = datetime.now(timezone.utc)
@@ -531,10 +572,14 @@ def build_matrix(
         # (مهمّ معرفة أين خرجت من التغطية) — تُبقى حينها للسياق فقط.
         if event.reason == "left_coverage" and not is_uae_related_event(event):
             continue
+        if uae_only and not is_uae_related_event(event):
+            continue
         zone = zone_at(event.last_lat, event.last_lon, event.country_code)
         if zone or is_uae_related_event(event):
             candidates[event.icao24] = None
     for landing in landings:
+        if uae_only and not landing.uae_related:
+            continue
         zone = zone_at(landing.latitude, landing.longitude, landing.airport_country_code)
         if zone or landing.uae_related:
             candidates[landing.icao24] = None
@@ -642,6 +687,37 @@ def _to_row(
     point_lat = landing.get("lat") or blackout.get("lat")
     point_lon = landing.get("lon") or blackout.get("lon")
 
+    # الأصل: من مسار الرحلة إن أُعلن (OSINT)، وإلا نعلن عدم التحديد.
+    route = next((item.route for item in own_events if item.route), None) or (
+        state.route if state else None
+    )
+    origin = ""
+    if route is not None:
+        origin = (
+            getattr(route, "origin_icao", None)
+            or getattr(route, "origin", None)
+            or ""
+        )
+    origin_text = str(origin).strip() or "غير محدد — لا مسار معلن"
+
+    # مفتاح الإزالة: تاريخ/توقيت أحدث رصد إماراتي لهذه الطائرة.
+    moment = (
+        own_events[0].last_seen
+        if own_events
+        else (own_landings[0].at if own_landings else datetime.now(timezone.utc))
+    )
+    key = dedup_key(assessment.icao24, moment, "MAT")
+
+    audited_by = AUDIT_PENDING
+    store = getattr(tracker, "store", None)
+    if store is not None and hasattr(store, "audit_for"):
+        try:
+            audit = store.audit_for(assessment.icao24)
+        except Exception:  # noqa: BLE001 - التدقيق ليس شرطاً للصف
+            audit = None
+        if audit and audit.get("model"):
+            audited_by = str(audit["model"])
+
     return MatrixRow(
         icao24=assessment.icao24,
         registration=str(registration),
@@ -657,15 +733,20 @@ def _to_row(
         sentinel_url=sentinel_url(point_lat, point_lon),
         earth_url=earth_url(point_lat, point_lon),
         zone_key=zone or "",
+        msn=MSN_UNAVAILABLE,
+        origin=origin_text,
+        audited_by=audited_by,
+        dedup_key=key,
     )
 
 
 def export_csv(rows: list[MatrixRow], path: Path) -> Path:
-    """يصدّر المصفوفة كـ CSV للتحليل في Pandas (الحقول التسعة + الملحقات)."""
+    """يصدّر المصفوفة كـ CSV للتحليل في Pandas (حقول Part A + الملحقات)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    headers = [label for _, label in MATRIX_FIELDS] + [
-        "Anomaly_Score", "Zone", "Sentinel_EO_Browser", "Google_Earth",
-    ]
+    headers = list(dict.fromkeys(
+        [label for _, label in MATRIX_FIELDS]
+        + ["Zone", "Sentinel_EO_Browser", "Google_Earth"]
+    ))
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=headers)
         writer.writeheader()

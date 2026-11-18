@@ -30,6 +30,8 @@ log = logging.getLogger("uae-aircraft-monitor")
 # يصل التقرير مرتين.
 SEND_GUARD_MINUTES = 40
 SEND_MARKER = Path("data/last-send.txt")
+# إيقاع منفصل للتقرير التفصيلي: كل 24 ساعة مرة واحدة، لا مع كل تقرير ساعي.
+DAILY_MARKER = Path("data/last-daily.txt")
 
 
 def _minutes_since_last_send() -> float | None:
@@ -46,6 +48,30 @@ def _mark_sent() -> None:
         SEND_MARKER.write_text(str(time.time()), encoding="utf-8")
     except OSError as exc:  # noqa: BLE001 - لا نُفشل التقرير بسبب ملف علامة
         log.warning("تعذّر حفظ علامة الإرسال: %s", exc)
+
+
+def _hours_since_last_daily() -> float | None:
+    try:
+        stamp = float(DAILY_MARKER.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return (time.time() - stamp) / 3600.0
+
+
+def _mark_daily_sent() -> None:
+    try:
+        DAILY_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        DAILY_MARKER.write_text(str(time.time()), encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001
+        log.warning("تعذّر حفظ علامة التقرير اليومي: %s", exc)
+
+
+def _should_include_daily(force: bool = False) -> bool:
+    """هل حان موعد التقرير التفصيلي (24 ساعة)؟"""
+    if force:
+        return True
+    age = _hours_since_last_daily()
+    return age is None or age >= settings.daily_guard_hours
 
 
 
@@ -114,6 +140,7 @@ async def _send_once(force: bool = False) -> None:
         raise SystemExit(
             "❌ لا توجد محادثات مسجّلة. أرسل /start للبوت أو حدّد TELEGRAM_CHAT_IDS."
         )
+    include_daily = _should_include_daily(force)
     messages = await build_messages(tracker)
     # مهلة أوسع: رفع PDF/DOCX يحتاج وقتاً أطول من رسالة نصية، وشبكة السحابة
     # قد تتأخر في إنشاء الاتصال. نعيد المحاولة فقط إن لم يُرسَل شيء بعد
@@ -144,9 +171,12 @@ async def _send_once(force: bool = False) -> None:
                         tracker,
                         messages[0] if messages else None,
                         settings.report_interval_minutes,
+                        include_daily=include_daily,
                     )
             log.info("تم إرسال %d رسالة إلى %d محادثة", sent, len(recipients))
             _mark_sent()
+            if include_daily:
+                _mark_daily_sent()
             return
         except Exception as exc:  # noqa: BLE001 - فشل الشبكة لا يفسد الجلب
             last_error = exc

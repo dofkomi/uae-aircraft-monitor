@@ -12,7 +12,7 @@ import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-from classifier import assess
+from classifier import assess, is_uae_related
 from config import settings
 from country_shapes import flag_emoji
 from models import LandingEvent, SignalEvent
@@ -57,28 +57,30 @@ def build_daily_snapshot(tracker, hours: int = 24) -> dict:
     events: list[SignalEvent] = tracker.events_since(since)
     landings: list[LandingEvent] = tracker.landings_since(since)
     states = list(tracker.current.values())
-    counts = tracker.counts()
 
     uae_events = [e for e in events if _is_uae_event(e)]
     uae_landings = [l for l in landings if l.uae_related]
-    unplanned = [l for l in landings if l.unplanned]
-    diverged = [l for l in landings if l.divergence]
+    # البوت متخصّص في الطائرات الإماراتية وحدها؛ غيرها إحصاء سياقي.
+    uae_states = [s for s in states if is_uae_related(s)]
+    unplanned = [l for l in uae_landings if l.unplanned]
+    diverged = [l for l in uae_landings if l.divergence]
+    other_events = [e for e in events if not _is_uae_event(e)]
+    other_landings = [l for l in landings if not l.uae_related]
 
     by_country = Counter()
     by_country_uae = Counter()
     by_reason = Counter()
     by_hour = Counter()
-    for event in events:
+    for event in uae_events:
         label = event.country or event.country_code or "غير محددة"
         by_country[label] += 1
-        if _is_uae_event(event):
-            by_country_uae[label] += 1
+        by_country_uae[label] += 1
         by_reason[event.reason or "unknown"] += 1
         by_hour[event.last_seen.replace(minute=0, second=0, microsecond=0)] += 1
 
     land_by_airport = Counter()
     land_by_country = Counter()
-    for landing in landings:
+    for landing in uae_landings:
         land_by_airport[
             (landing.airport_ident, landing.airport_name, landing.airport_country_code)
         ] += 1
@@ -86,7 +88,7 @@ def build_daily_snapshot(tracker, hours: int = 24) -> dict:
 
     global_seen = sum(1 for e in uae_events if e.still_broadcasting)
     suspects = []
-    for state in states:
+    for state in uae_states:
         if tracker.classifications.get(state.icao24) == "military":
             continue
         result = assess(state)
@@ -107,6 +109,7 @@ def build_daily_snapshot(tracker, hours: int = 24) -> dict:
             "flagged": scope["flagged"],
             "coverage_exits": scope.get("coverage_exits", 0),
             "top": scope["top"],
+            "matrix": [row.as_dict() for row in matrix],
         }
     except Exception as exc:  # noqa: BLE001 - التقرير اليومي يكفي بدونه
         log.warning("تعذّر بناء ملخّص الساحل اليومي: %s", exc)
@@ -119,18 +122,27 @@ def build_daily_snapshot(tracker, hours: int = 24) -> dict:
             "to": now.strftime("%Y-%m-%d %H:%M"),
         },
         "totals": {
-            "aircraft_now": len(states),
-            "airborne_now": sum(1 for s in states if not s.on_ground),
-            "military_now": counts.get("military", 0),
-            "events": len(events),
+            "aircraft_now": len(uae_states),
+            "airborne_now": sum(1 for s in uae_states if not s.on_ground),
+            "military_now": sum(
+                1 for s in uae_states
+                if tracker.classifications.get(s.icao24) == "military"
+            ),
+            "events": len(uae_events),
             "events_uae": len(uae_events),
-            "events_other": len(events) - len(uae_events),
+            "events_other": len(other_events),
             "events_still_global": global_seen,
-            "landings": len(landings),
+            "landings": len(uae_landings),
             "landings_uae": len(uae_landings),
+            "landings_other": len(other_landings),
             "unplanned": len(unplanned),
             "diverged": len(diverged),
-            "unique_aircraft": len({e.icao24 for e in events} | {l.icao24 for l in landings}),
+            "unique_aircraft": len(
+                {e.icao24 for e in uae_events} | {l.icao24 for l in uae_landings}
+            ),
+            "context_aircraft_now": len(states),
+            "context_events": len(events),
+            "context_landings": len(landings),
         },
         "events_by_country": [
             {"country": name, "count": count} for name, count in by_country.most_common(8)
@@ -260,14 +272,6 @@ def build_daily_report(tracker, hours: int = 24) -> str:
                  f"هبوط خارجي بوجهة غير إماراتية: <b>{totals['diverged']}</b>")
     lines.append("")
 
-    lines.append("🌍 <b>أين انقطعت الإشارة (كل الطائرات)</b>")
-    if snap["events_by_country"]:
-        for item in snap["events_by_country"]:
-            lines.append(f"  • {_country(None, item['country'])}: <b>{item['count']}</b>")
-    else:
-        lines.append("  • لا أحداث في هذه الفترة.")
-    lines.append("")
-
     lines.append("🇦🇪 <b>أين انقطعت إشارة الطائرات الإماراتية</b>")
     if snap["events_by_country_uae"]:
         for item in snap["events_by_country_uae"]:
@@ -384,12 +388,73 @@ def build_daily_report(tracker, hours: int = 24) -> str:
                 f"{item['score']}% · ثقة {_esc(item['confidence'])} · "
                 f"{_esc(item['zone'])} · {_esc(reasons)}"
             )
-        lines.append(
-            "  <i>المصفوفة الكاملة بالحقول التسعة وروابط Sentinel-2 في قسم "
-            "البيانات التفصيلية.</i>"
-        )
+        lines.append("")
+        lines.append("🧾 <b>مصفوفة الاستخبارات (Part A) — الطائرات الإماراتية</b>")
+        matrix_rows = sahel.get("matrix") or []
+        if matrix_rows:
+            for index, row in enumerate(matrix_rows, start=1):
+                lines.append(
+                    f"  <b>{index}) {_esc(row.get('Flight_Hex'))} · "
+                    f"{_esc(row.get('Registration'))}</b> — درجة الشذوذ "
+                    f"<b>{row.get('Anomaly_Score', 0)}%</b> · ثقة "
+                    f"{_esc(row.get('Confidence_Level'))} · {_esc(row.get('Zone'))}"
+                )
+                lines.append(f"      • MSN: {_esc(row.get('MSN'))}")
+                lines.append(f"      • الأصل/الانطلاق: {_esc(row.get('Origin'))}")
+                lines.append(
+                    f"      • نقطة الدخول إلى الساحل: {_esc(row.get('Entry_Point_Sahel'))}"
+                )
+                lines.append(
+                    f"      • إحداثيات الانقطاع: {_esc(row.get('Blackout_LatLong'))}"
+                )
+                lines.append(f"      • مهبط الهبوط: {_esc(row.get('Landing_Airfield'))}")
+                lines.append(
+                    f"      • تدقيق النموذج الثاني: {_esc(row.get('Audited_By_Model'))}"
+                )
+                lines.append(
+                    "      • المؤشرات: " + _esc(row.get("Anomaly_Indicators") or "—")
+                )
+                if row.get("Sentinel_EO_Browser"):
+                    lines.append(
+                        f"      • Sentinel-2: {_esc(row.get('Sentinel_EO_Browser'))}"
+                    )
+                lines.append("")
+        else:
+            lines.append("  • لا صفوف إماراتية في المصفوفة لهذه الفترة.")
+        lines.append("")
     else:
         lines.append("  • تعذّر بناء تحليل الساحل لهذه الفترة.")
+    lines.append("")
+
+    # ── Part B: سجل نقاط إخفاء التعريف والمهابط المتكرّرة ──
+    from ledger import build_hotspots, sync
+
+    try:
+        sync(tracker, hours)
+        hotspots = build_hotspots(tracker, hours)
+    except Exception as exc:  # noqa: BLE001 - لا يُفشل التقرير
+        log.warning("تعذّر بناء سجل الساحل اليومي (Part B): %s", exc)
+        hotspots = []
+    lines.append("🗂️ <b>سجل نقاط إخفاء التعريف والمهابط (Part B)</b>")
+    if hotspots:
+        for index, row in enumerate(hotspots, start=1):
+            lines.append(
+                f"  <b>{index}) {_esc(row.zone_id)}</b> · {_esc(row.country_region)} — "
+                f"تكرار <b>{row.frequency}</b> ({_esc(row.breakdown)})"
+            )
+            lines.append(f"      • المهبط/الإحداثيات: {_esc(row.airfield)}")
+            lines.append(
+                "      • الرموز المرتبطة: "
+                + ("، ".join(_esc(code) for code in row.hex_codes) or "—")
+            )
+            lines.append(f"      • حالة التحقق البصري: {_esc(row.imint_status)}")
+            lines.append(f"      • مستوى الثقة: {_esc(row.confidence)}")
+            lines.append("")
+        lines.append(
+            "  <i>التكرار يعني «رصد متكرّر» لا «تأكيد هبوط»؛ التحقق البصري معلّق.</i>"
+        )
+    else:
+        lines.append("  • لا نقاط ساخنة في السجل بعد.")
     lines.append("")
 
     down = [item["name"] for item in snap["sources"] if not item["ok"]]
@@ -551,6 +616,23 @@ async def build_daily_analysis(tracker, analyzer=None, hours: int = 24) -> tuple
 
     snapshot = build_daily_snapshot(tracker, hours)
     title = f"🧠 <b>استنتاجات {hours} ساعة</b>"
+
+    # 1) خطّ النماذج الثلاثي (تصفية → استدلال → تدقيق) قبل المزوّد الواحد.
+    if settings.llm_pipeline_enabled and settings.ai_report_mode != "off":
+        try:
+            from pipeline import run_analysis
+
+            result = await run_analysis(snapshot, tracker=tracker, kind="daily")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("تعذّر خطّ النماذج اليومي: %s", exc)
+            result = None
+        if result is not None:
+            text = format_ai_text(result.text)
+            if text:
+                return (
+                    f"{title}\n<i>المصدر: {html.escape(result.source)}</i>\n\n{text}",
+                    result.source,
+                )
 
     if settings.ai_enabled and settings.ai_report_mode != "off":
         analyzer = analyzer or AIAnalyzer()

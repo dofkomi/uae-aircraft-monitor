@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
@@ -11,6 +12,8 @@ from config import settings
 from country_shapes import default_shapes, flag_emoji
 from models import AircraftState, LandingEvent, SignalEvent
 from tracker import AircraftTracker
+
+log = logging.getLogger("reporter")
 
 REASON_LABELS = {
     "no_broadcast": "غياب بث داخل المنطقة",
@@ -307,26 +310,31 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
     airborne = [s for s in states if not s.on_ground]
     on_ground = [s for s in states if s.on_ground]
     uae_related = [s for s in states if is_uae_related(s)]
-    climbing = sum(1 for s in airborne if s.vertical_rate and s.vertical_rate > 0.5)
-    descending = sum(1 for s in airborne if s.vertical_rate and s.vertical_rate < -0.5)
-    level = len(airborne) - climbing - descending
-    emergency = [s for s in states if s.squawk in EMERGENCY_SQUAWKS]
+    # البوت متخصّص في الطائرات الإماراتية وحدها؛ غيرها إحصاء سياقي لا يُفصَّل.
+    uae_states = uae_related
+    climbing = sum(1 for s in uae_states if not s.on_ground and s.vertical_rate and s.vertical_rate > 0.5)
+    descending = sum(1 for s in uae_states if not s.on_ground and s.vertical_rate and s.vertical_rate < -0.5)
+    level = len([s for s in uae_states if not s.on_ground]) - climbing - descending
+    emergency = [s for s in uae_states if s.squawk in EMERGENCY_SQUAWKS]
 
-    altitudes = [s.altitude_ft for s in airborne if s.altitude_ft is not None]
-    speeds = [s.speed_kts for s in states if s.speed_kts is not None]
+    uae_airborne = [s for s in uae_states if not s.on_ground]
+    altitudes = [s.altitude_ft for s in uae_airborne if s.altitude_ft is not None]
+    speeds = [s.speed_kts for s in uae_states if s.speed_kts is not None]
     avg_alt = int(sum(altitudes) / len(altitudes)) if altitudes else None
     avg_speed = int(sum(speeds) / len(speeds)) if speeds else None
     max_alt_state = max(
-        (s for s in airborne if s.altitude_ft is not None),
+        (s for s in uae_airborne if s.altitude_ft is not None),
         key=lambda s: s.altitude_ft or 0,
         default=None,
     )
     max_speed_state = max(
-        (s for s in states if s.speed_kts is not None),
+        (s for s in uae_states if s.speed_kts is not None),
         key=lambda s: s.speed_kts or 0,
         default=None,
     )
 
+    uae_landings = [item for item in landings if item.uae_related]
+    other_landings = [item for item in landings if not item.uae_related]
     diverged = [item for item in landings if item.divergence]
     uae_diverged = [item for item in diverged if item.uae_related]
     other_diverged = [item for item in diverged if not item.uae_related]
@@ -357,30 +365,37 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
     )
 
     # ── الملخص التنفيذي ──
-    lines.append("📊 <b>الملخص التنفيذي</b>")
-    lines.append(f"  • إجمالي الطائرات المرصودة الآن: <b>{counts['current']}</b>")
+    lines.append("📊 <b>الملخص التنفيذي — الطائرات الإماراتية</b>")
     lines.append(
-        f"  • التصنيف: عسكرية <b>{counts['military']}</b> · مدنية "
-        f"<b>{counts['civilian']}</b> · غير مصنّفة <b>{counts['unknown']}</b>"
+        f"  • الطائرات الإماراتية/المستأجرة إماراتياً الآن: <b>{len(uae_states)}</b> "
+        f"(في الجو <b>{len(uae_airborne)}</b> · على الأرض "
+        f"<b>{len(uae_states) - len(uae_airborne)}</b>)"
+    )
+    uae_military = sum(
+        1 for s in uae_states if tracker.classifications.get(s.icao24) == "military"
     )
     lines.append(
-        f"  • الحالة: في الجو <b>{len(airborne)}</b> · على الأرض <b>{len(on_ground)}</b> "
-        f"· 🇦🇪 مرتبطة بالإمارات <b>{len(uae_related)}</b>"
+        f"  • التصنيف (إماراتية): عسكرية <b>{uae_military}</b> · مدنية "
+        f"<b>{len(uae_states) - uae_military}</b>"
     )
     lines.append(
-        f"  • الحركة: صعود {climbing} · هبوط {descending} · مستوى ثابت {level}"
+        f"  • الحركة (إماراتية): صعود {climbing} · هبوط {descending} · مستوى ثابت {level}"
     )
     if avg_alt is not None or avg_speed is not None:
         lines.append(
-            f"  • المتوسط: ارتفاع {_fmt_alt(avg_alt)} · سرعة {_fmt_speed(avg_speed)}"
+            f"  • المتوسط (إماراتية): ارتفاع {_fmt_alt(avg_alt)} · سرعة {_fmt_speed(avg_speed)}"
         )
     lines.append(
         f"  • انقطاع إشارة (إماراتية): <b>{len(uae_events)}</b> طائرة في "
-        f"<b>{len(by_country)}</b> دولة · طائرات أخرى: <b>{len(other_events)}</b>"
+        f"<b>{len(by_country)}</b> دولة"
     )
     lines.append(
-        f"  • هبوطات: <b>{len(landings)}</b> · وجهات غير الإمارات: <b>{len(diverged)}</b> "
-        f"· غير مبرمجة سابقاً: <b>{len(unplanned)}</b>"
+        f"  • هبوطات (إماراتية): <b>{len(uae_landings)}</b> · وجهات غير الإمارات: "
+        f"<b>{len(uae_diverged)}</b> · غير مبرمجة سابقاً: <b>{len(unplanned)}</b>"
+    )
+    lines.append(
+        f"  • <i>سياق عام (لا يُفصَّل): {counts['current']} طائرة في النطاق، منها "
+        f"{len(other_events)} حدث انقطاع لطائرات غير إماراتية.</i>"
     )
     if emergency:
         codes = ", ".join(sorted({s.squawk or "" for s in emergency}))
@@ -419,9 +434,9 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
             lines.append(f"  • {item}")
         lines.append("")
 
-    # ── توزيع الطائرات الحالية حسب الدولة (تحديد محلي بلا استهلاك حصة) ──
+    # ── توزيع الطائرات الإماراتية الحالية حسب الدولة (تحديد محلي بلا حصة) ──
     state_countries: Counter[str] = Counter()
-    for state in states:
+    for state in uae_states:
         if state.latitude is None or state.longitude is None:
             state_countries["📍 بدون موقع معروف"] += 1
             continue
@@ -431,17 +446,17 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         state_countries[label_text] += 1
 
     # ── التركيز الأساسي: الدولة التي انقطع فيها الإشارة ──
-    lines.append("🗺️ <b>توزيع الطائرات الحالية حسب الدولة</b>")
+    lines.append("🗺️ <b>توزيع الطائرات الإماراتية الحالية حسب الدولة</b>")
     if state_countries:
         for country, count in state_countries.most_common(12):
             lines.append(
                 f"  • {_esc(country)}: <b>{count}</b> طائرة "
-                f"({_percent(count, len(states))})"
+                f"({_percent(count, len(uae_states))})"
             )
         if len(state_countries) > 12:
             lines.append(f"  … و {len(state_countries) - 12} دولة أخرى")
     else:
-        lines.append("  • لا توجد طائرات مرصودة حالياً.")
+        lines.append("  • لا توجد طائرات إماراتية مرصودة حالياً.")
     lines.append("")
 
     # ── التركيز الأساسي: الدولة التي انقطع فيها الإشارة (طائرات إماراتية فقط) ──
@@ -481,14 +496,18 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
     lines.append("")
 
     # ── الهبوطات المرصودة ──
-    lines.append("🛬 <b>الهبوطات المرصودة خلال الفترة</b>")
-    if landings:
-        for item in landings[: settings.max_report_aircraft]:
+    lines.append("🛬 <b>الهبوطات المرصودة — الطائرات الإماراتية</b>")
+    if uae_landings:
+        for item in uae_landings[: settings.max_report_aircraft]:
             lines.append(_landing_detail(item))
-        if len(landings) > settings.max_report_aircraft:
-            lines.append(f"  … و {len(landings) - settings.max_report_aircraft} هبوط آخر")
+        if len(uae_landings) > settings.max_report_aircraft:
+            lines.append(f"  … و {len(uae_landings) - settings.max_report_aircraft} هبوط آخر")
     else:
-        lines.append("  • لا توجد هبوطات مرصودة خلال هذه الفترة.")
+        lines.append("  • لا توجد هبوطات إماراتية مرصودة خلال هذه الفترة.")
+    if other_landings:
+        lines.append(
+            f"  <i>طائرات أخرى: {len(other_landings)} هبوط — إحصاء سياقي فقط.</i>"
+        )
     lines.append("")
 
     # ── الطائرات التي هبطت بالخارج ثم غيّرت وجهتها ──
@@ -498,9 +517,9 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         for item in uae_diverged[: settings.max_report_aircraft]:
             lines.append(_landing_detail(item))
     if other_diverged:
-        lines.append("  <u>طائرات أخرى:</u>")
-        for item in other_diverged[: settings.max_report_aircraft]:
-            lines.append(_landing_detail(item))
+        lines.append(
+            f"  <i>طائرات أخرى: {len(other_diverged)} حالة — إحصاء سياقي فقط.</i>"
+        )
     if not diverged:
         lines.append("  • لا توجد حالات هبوط في الخارج تلتها وجهة غير الإمارات.")
     lines.append("")
@@ -508,7 +527,7 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
     # ── وجهات/رحلات غير مبرمجة سابقاً ──
     uae_unplanned = [item for item in unplanned if item.uae_related]
     lines.append("🆕 <b>وجهات غير مبرمجة سابقاً (توقّف مفاجئ خارج النمط)</b>")
-    if unplanned:
+    if uae_unplanned:
         for item in uae_unplanned[: settings.max_report_aircraft]:
             reason = item.unplanned_reason or "غير معروف"
             lines.append(
@@ -522,13 +541,13 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
                 f"  <i>طائرات أخرى بوجهات جديدة: {len(others)} — تُسجَّل في قاعدة البيانات.</i>"
             )
     else:
-        lines.append("  • لا توجد هبوطات في مطارات جديدة أو مخالفة للمسار خلال الفترة.")
+        lines.append("  • لا توجد هبوطات إماراتية في مطارات جديدة أو مخالفة للمسار.")
     lines.append("")
 
     # ── تنبؤ الطابع العسكري ──
     lines.append("🔎 <b>تنبؤ الطابع العسكري (حركة + بيانات تعريف)</b>")
     predictions = []
-    for state in states:
+    for state in uae_states:
         if tracker.classifications.get(state.icao24) == "military":
             continue  # المصنّفة عسكرياً تُعرض في قسمها أدناه
         result = assess(state)
@@ -570,11 +589,11 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
 
     # ── الطائرات العسكرية ──
     military = [
-        state for state in states
+        state for state in uae_states
         if tracker.classifications.get(state.icao24) == "military"
     ]
     military.sort(key=lambda s: s.display_name)
-    lines.append("🛡️ <b>الطائرات العسكرية المرصودة</b>")
+    lines.append("🛡️ <b>الطائرات العسكرية المرصودة — الإمارات</b>")
     if military:
         for state in military[: settings.max_report_aircraft]:
             lines.append(
@@ -585,17 +604,17 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         if len(military) > settings.max_report_aircraft:
             lines.append(f"  … و {len(military) - settings.max_report_aircraft} طائرة أخرى")
     else:
-        lines.append("  • لا توجد طائرات عسكرية مرصودة في هذه اللحظة.")
+        lines.append("  • لا توجد طائرات عسكرية إماراتية مرصودة في هذه اللحظة.")
     lines.append("")
 
     # ── أسرع/أعلى الطائرات ──
     top_speed = sorted(
-        (s for s in states if s.speed_kts is not None),
+        (s for s in uae_states if s.speed_kts is not None),
         key=lambda s: s.speed_kts or 0,
         reverse=True,
     )[:5]
     top_alt = sorted(
-        (s for s in airborne if s.altitude_ft is not None),
+        (s for s in uae_airborne if s.altitude_ft is not None),
         key=lambda s: s.altitude_ft or 0,
         reverse=True,
     )[:5]
@@ -619,7 +638,7 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
 
     # ── توزيع دول التسجيل ──
     origins = Counter(
-        s.origin_country for s in states if s.origin_country
+        s.origin_country for s in uae_states if s.origin_country
     )
     if origins:
         top = " · ".join(
@@ -630,7 +649,7 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
     # ── أكثر نداءات الاستدعاء ──
     prefixes = Counter(
         (state.callsign or "")[:3]
-        for state in states
+        for state in uae_states
         if state.callsign
     )
     if prefixes:
@@ -675,7 +694,7 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         )
     lines.append("")
 
-    lines.append("🧾 <b>مصفوفة الاستخبارات — الحقول التسعة</b>")
+    lines.append("🧾 <b>مصفوفة الاستخبارات — الطائرات الإماراتية</b>")
     if matrix:
         for index, row in enumerate(matrix, start=1):
             lines.append(
@@ -683,11 +702,14 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
                 f"{_esc(row.registration)}</b> — درجة الشذوذ "
                 f"<b>{row.score}%</b> · ثقة {_esc(row.confidence)} · {_esc(row.zone)}"
             )
+            lines.append(f"      • MSN: {_esc(row.msn)}")
             lines.append(f"      • المشغّل المعلن: {_esc(row.operator)}")
             lines.append(f"      • طبقة التأجير الفعلية: {_esc(row.leasing_layer)}")
+            lines.append(f"      • الأصل/الانطلاق: {_esc(row.origin)}")
             lines.append(f"      • نقطة الدخول إلى الساحل: {_esc(row.entry_point)}")
             lines.append(f"      • إحداثيات الانقطاع: {_esc(row.blackout)}")
             lines.append(f"      • مهبط الهبوط: {_esc(row.landing)}")
+            lines.append(f"      • تدقيق النموذج الثاني: {_esc(row.audited_by)}")
             lines.append(
                 "      • المؤشرات: "
                 + ("؛ ".join(_esc(item) for item in row.indicators) or "—")
@@ -700,12 +722,50 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         lines.append(
             "  <i>مستوى الثقة يُشتق من عدد المؤشرات المستقلة لا من حجم الدرجة. "
             "«طبقة التأجير الفعلية» لا تكشفها بيانات ADS-B العامة؛ تبقى غير محددة "
-            "حتى تُقابل بسجلات الطيران والعقود.</i>"
+            "حتى تُقابل بسجلات الطيران والعقود. الرقم التسلسلي للمصنع (MSN) لا "
+            "يحمله بث ADS-B العام.</i>"
         )
     else:
         lines.append(
-            "  • لا صفوف في المصفوفة: لم تُرصد أي رحلة داخل نطاق الساحل، ولم "
-            "تتجاوز أي طائرة مرتبطة بالإمارات عتبة الشذوذ (20%) خلال 24 ساعة."
+            "  • لا صفوف في المصفوفة: لم تُرصد أي رحلة إماراتية داخل نطاق الساحل، "
+            "ولم تتجاوز أي طائرة إماراتية عتبة الشذوذ (20%) خلال 24 ساعة."
+        )
+    lines.append("")
+
+    # ── Part B: سجل نقاط إخفاء التعريف والمهابط المتكرّرة ──
+    from ledger import build_hotspots, sync
+
+    try:
+        sync(tracker, 24)
+        hotspots = build_hotspots(tracker, 24)
+    except Exception as exc:  # noqa: BLE001 - لا يُفشل التقرير
+        log.warning("تعذّر بناء سجل الساحل (Part B): %s", exc)
+        hotspots = []
+    lines.append("🗂️ <b>سجل نقاط إخفاء التعريف والمهابط (Part B)</b>")
+    if hotspots:
+        for index, row in enumerate(hotspots, start=1):
+            lines.append(
+                f"  <b>{index}) {_esc(row.zone_id)}</b> · {_esc(row.country_region)} — "
+                f"تكرار <b>{row.frequency}</b> ({_esc(row.breakdown)})"
+            )
+            lines.append(f"      • المهبط/الإحداثيات: {_esc(row.airfield)}")
+            lines.append(
+                "      • الرموز المرتبطة: "
+                + ("، ".join(_esc(code) for code in row.hex_codes) or "—")
+            )
+            lines.append(f"      • حالة التحقق البصري: {_esc(row.imint_status)}")
+            lines.append(f"      • مستوى الثقة: {_esc(row.confidence)}")
+            if row.sentinel_url:
+                lines.append(f"      • Sentinel-2: {_esc(row.sentinel_url)}")
+            lines.append("")
+        lines.append(
+            "  <i>التكرار يعني «رصد متكرّر» لا «تأكيد هبوط». التحقق البصري "
+            "يبقى معلّقاً حتى تُراجع صورة Sentinel-2 فعلياً.</i>"
+        )
+    else:
+        lines.append(
+            "  • لا نقاط ساخنة في السجل بعد: لا انقطاع إماراتي ولا هبوط متكرّر "
+            "خلال 24 ساعة."
         )
     lines.append("")
 

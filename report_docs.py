@@ -320,6 +320,7 @@ def build_documents(
     hours: int = 24,
     now: datetime | None = None,
     out_dir: Path | None = None,
+    include_daily: bool = True,
 ) -> dict[str, Path]:
     """يولّد الملفين ويعيد مساريهما. لا يرفع استثناءً إن فشل PDF فقط."""
     now = now or datetime.now(timezone.utc)
@@ -332,10 +333,9 @@ def build_documents(
         period_minutes=period_minutes,
         hours=hours,
     )
-    subtitle = (
-        f"{now.strftime('%Y-%m-%d %H:%M')} UTC · آخر {period_minutes} دقيقة "
-        f"+ تقرير {hours} ساعة"
-    )
+    subtitle = f"{now.strftime('%Y-%m-%d %H:%M')} UTC · آخر {period_minutes} دقيقة"
+    if include_daily:
+        subtitle += f" + تقرير {hours} ساعة"
 
     paths: dict[str, Path] = {}
     paths["docx"] = build_docx(sections, title, subtitle, now, out_dir)
@@ -399,13 +399,18 @@ async def send_documents(
             daily_detail or None,
             period_minutes=period_minutes,
             hours=hours,
+            include_daily=include_daily,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("تعذّر توليد ملفات التقرير: %s", exc)
         return
 
     captions = {
-        "pdf": "📄 نسخة PDF — دراسة + تفاصيل + تقرير 24 ساعة (للطباعة والأرشفة)",
+        "pdf": (
+            "📄 نسخة PDF — دراسة + تفاصيل + تقرير 24 ساعة (للطباعة والأرشفة)"
+            if include_daily
+            else "📄 نسخة PDF — الدراسة والتفاصيل (للطباعة والأرشفة)"
+        ),
         "docx": "📝 نسخة DOCX — قابلة للتعديل والاستخراج",
     }
     for key, caption in captions.items():

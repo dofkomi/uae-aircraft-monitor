@@ -21,6 +21,30 @@ from tracker import AircraftTracker
 
 log = logging.getLogger(__name__)
 
+# إيقاع التقرير التفصيلي (24 ساعة) منفصل عن التقرير الساعي.
+DAILY_MARKER = Path("data/last-daily.txt")
+
+
+def _hours_since_last_daily() -> float | None:
+    try:
+        stamp = float(DAILY_MARKER.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return (time.time() - stamp) / 3600.0
+
+
+def _mark_daily_sent() -> None:
+    try:
+        DAILY_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        DAILY_MARKER.write_text(str(time.time()), encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001
+        log.warning("تعذّر حفظ علامة التقرير اليومي: %s", exc)
+
+
+def _should_include_daily() -> bool:
+    age = _hours_since_last_daily()
+    return age is None or age >= settings.daily_guard_hours
+
 BOT_COMMANDS = [
     BotCommand("start", "🚀 معلومات البوت"),
     BotCommand("help", "📖 قائمة الأوامر"),
@@ -257,6 +281,8 @@ class ReportBot:
         except Exception as exc:  # noqa: BLE001 - لا يوقف خطأ التحليل الجدولة
             log.exception("فشل بناء التقرير المجدول: %s", exc)
             return
+        include_daily = _should_include_daily()
+        sent_all = True
         for chat_id in self.recipients:
             for message in messages:
                 for part in split_message(message):
@@ -267,6 +293,7 @@ class ReportBot:
                         )
                     except Exception as exc:  # noqa: BLE001
                         log.warning("تعذّر الإرسال إلى %s: %s", chat_id, exc)
+                        sent_all = False
             try:
                 await send_documents(
                     context.bot,
@@ -274,9 +301,13 @@ class ReportBot:
                     self.tracker,
                     messages[0] if messages else None,
                     settings.report_interval_minutes,
+                    include_daily=include_daily,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("تعذّر إرسال ملفات التقرير إلى %s: %s", chat_id, exc)
+                sent_all = False
+        if include_daily and sent_all:
+            _mark_daily_sent()
 
     # ------------------------------------------------------------------ إعداد
     async def _post_init(self, application: Application) -> None:
