@@ -1,4 +1,4 @@
-name: UAE Aircraft Report
+﻿name: UAE Aircraft Report
 
 # بديل مجاني تماماً (بلا بطاقة ائتمان): تقرير كل ساعة عبر GitHub Actions.
 # أضف TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_IDS في Settings > Secrets and variables > Actions
@@ -8,8 +8,8 @@ on:
     # موعدان في الساعة: GitHub يؤجّل بشدة الطلبات المجدولة عند رأس الساعة
     # (ملايين المستودعات تطلبها في اللحظة نفسها)، وقد يُهمل أحد الموعدين.
     # الدقيقة 37 احتياطية، وmain.py يتخطّى الإرسال إن أُرسل تقرير قبل 40 دقيقة.
-    - cron: '5 * * * *'
-    - cron: '35 * * * *'
+    - cron: '7 * * * *'
+    - cron: '37 * * * *'
   workflow_dispatch:
     inputs:
       force:
