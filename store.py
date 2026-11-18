@@ -1,0 +1,274 @@
+"""تخزين محلي بسيط (SQLite) لبيانات الطائرات وأحداث فقدان الإشارة."""
+from __future__ import annotations
+
+import sqlite3
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
+
+from models import AircraftState, LandingEvent, SignalEvent
+
+
+class Store:
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._init()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    @contextmanager
+    def _tx(self) -> Iterator[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _init(self) -> None:
+        with self._tx() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS meta (
+                    icao24        TEXT PRIMARY KEY,
+                    registration  TEXT,
+                    aircraft_type TEXT,
+                    model         TEXT,
+                    manufacturer  TEXT,
+                    operator      TEXT,
+                    updated_at    INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sightings (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    icao24      TEXT NOT NULL,
+                    seen_at     INTEGER NOT NULL,
+                    callsign    TEXT,
+                    lat         REAL,
+                    lon         REAL,
+                    altitude_ft INTEGER,
+                    source      TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_sightings_icao ON sightings(icao24, seen_at);
+                CREATE INDEX IF NOT EXISTS idx_sightings_time ON sightings(seen_at);
+                CREATE TABLE IF NOT EXISTS signal_events (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    icao24          TEXT NOT NULL,
+                    callsign        TEXT,
+                    classification  TEXT,
+                    last_seen       INTEGER NOT NULL,
+                    lat             REAL,
+                    lon             REAL,
+                    reason          TEXT,
+                    country         TEXT,
+                    country_code    TEXT,
+                    nearest_airport TEXT,
+                    geo_source      TEXT,
+                    created_at      INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_events_time ON signal_events(created_at);
+                CREATE TABLE IF NOT EXISTS landings (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    icao24             TEXT NOT NULL,
+                    callsign           TEXT,
+                    registration       TEXT,
+                    classification     TEXT,
+                    uae_related        INTEGER,
+                    airport_ident      TEXT,
+                    airport_name       TEXT,
+                    airport_country    TEXT,
+                    at                 INTEGER NOT NULL,
+                    lat                REAL,
+                    lon                REAL,
+                    from_airport       TEXT,
+                    from_country       TEXT,
+                    divergence         INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_landings_time ON landings(at);
+                CREATE INDEX IF NOT EXISTS idx_landings_icao ON landings(icao24, at);
+                CREATE TABLE IF NOT EXISTS geo_cache (
+                    key          TEXT PRIMARY KEY,
+                    country      TEXT,
+                    country_code TEXT,
+                    source       TEXT,
+                    fetched_at   INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS poll_log (
+                    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    at      INTEGER NOT NULL,
+                    source  TEXT,
+                    count   INTEGER,
+                    ok      INTEGER,
+                    message TEXT
+                );
+                """
+            )
+
+    # ---------- بيانات تعريف الطائرة ----------
+    def get_meta(self, icao24: str) -> dict | None:
+        with self._tx() as conn:
+            row = conn.execute("SELECT * FROM meta WHERE icao24 = ?", (icao24,)).fetchone()
+            return dict(row) if row else None
+
+    def save_meta(self, icao24: str, **fields) -> None:
+        fields = {k: v for k, v in fields.items() if k in {
+            "registration", "aircraft_type", "model", "manufacturer", "operator"
+        }}
+        if not fields:
+            return
+        fields["updated_at"] = int(time.time())
+        columns = ", ".join(fields)
+        placeholders = ", ".join("?" for _ in fields)
+        updates = ", ".join(f"{key}=excluded.{key}" for key in fields if key != "updated_at")
+        with self._tx() as conn:
+            conn.execute(
+                f"INSERT INTO meta (icao24, {columns}) VALUES (?, {placeholders}) "
+                f"ON CONFLICT(icao24) DO UPDATE SET {updates}",
+                (icao24, *fields.values()),
+            )
+
+    # ---------- الرصد ----------
+    def add_sighting(self, state: AircraftState) -> None:
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO sightings (icao24, seen_at, callsign, lat, lon, altitude_ft, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    state.icao24,
+                    state.last_contact or int(time.time()),
+                    state.callsign,
+                    state.latitude,
+                    state.longitude,
+                    state.altitude_ft,
+                    state.source,
+                ),
+            )
+
+    def add_event(self, event: SignalEvent) -> None:
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO signal_events "
+                "(icao24, callsign, classification, last_seen, lat, lon, reason, "
+                "country, country_code, nearest_airport, geo_source, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.icao24,
+                    event.callsign,
+                    event.classification,
+                    int(event.last_seen.timestamp()),
+                    event.last_lat,
+                    event.last_lon,
+                    event.reason,
+                    event.country,
+                    event.country_code,
+                    event.nearest_airport,
+                    event.geo_source,
+                    int(event.created_at.timestamp()),
+                ),
+            )
+
+    def update_event_geo(self, event: SignalEvent) -> None:
+        """يضيف اسم الدولة/Mطار إلى أحدث صف لهذا الحدث بعد الجلب الجغرافي."""
+        with self._tx() as conn:
+            conn.execute(
+                "UPDATE signal_events SET country = ?, country_code = ?, "
+                "nearest_airport = ?, geo_source = ? "
+                "WHERE id = (SELECT id FROM signal_events WHERE icao24 = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT 1)",
+                (
+                    event.country,
+                    event.country_code,
+                    event.nearest_airport,
+                    event.geo_source,
+                    event.icao24,
+                ),
+            )
+
+    def add_landing(self, landing: LandingEvent) -> None:
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO landings "
+                "(icao24, callsign, registration, classification, uae_related, "
+                "airport_ident, airport_name, airport_country, at, lat, lon, "
+                "from_airport, from_country, divergence) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    landing.icao24,
+                    landing.callsign,
+                    landing.registration,
+                    landing.classification,
+                    int(landing.uae_related),
+                    landing.airport_ident,
+                    landing.airport_name,
+                    landing.airport_country_code,
+                    int(landing.at.timestamp()),
+                    landing.latitude,
+                    landing.longitude,
+                    landing.from_airport,
+                    landing.from_country_code,
+                    int(landing.divergence),
+                ),
+            )
+
+    def landings_since(self, since_ts: int, limit: int = 100) -> list[dict]:
+        with self._tx() as conn:
+            rows = conn.execute(
+                "SELECT * FROM landings WHERE at >= ? ORDER BY at DESC LIMIT ?",
+                (since_ts, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_geo(self, key: str) -> dict | None:
+        with self._tx() as conn:
+            row = conn.execute("SELECT * FROM geo_cache WHERE key = ?", (key,)).fetchone()
+            return dict(row) if row else None
+
+    def save_geo(self, key: str, country: str, country_code: str | None, source: str) -> None:
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO geo_cache (key, country, country_code, source, fetched_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET country=excluded.country, "
+                "country_code=excluded.country_code, source=excluded.source, "
+                "fetched_at=excluded.fetched_at",
+                (key, country, country_code, source, int(time.time())),
+            )
+
+    def events_since(self, since_ts: int, limit: int = 100) -> list[dict]:
+        with self._tx() as conn:
+            rows = conn.execute(
+                "SELECT * FROM signal_events WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
+                (since_ts, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def log_poll(self, source: str, count: int, ok: bool, message: str = "") -> None:
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO poll_log (at, source, count, ok, message) VALUES (?, ?, ?, ?, ?)",
+                (int(time.time()), source, count, int(ok), message[:300]),
+            )
+
+    def prune(self, keep_days: int = 7) -> None:
+        cutoff = int(time.time()) - keep_days * 86400
+        with self._tx() as conn:
+            for table, column in (
+                ("sightings", "seen_at"),
+                ("signal_events", "created_at"),
+                ("landings", "at"),
+                ("poll_log", "at"),
+            ):
+                conn.execute(f"DELETE FROM {table} WHERE {column} < ?", (cutoff,))
+
+    def stats(self) -> dict:
+        with self._tx() as conn:
+            return {
+                "known_aircraft": conn.execute("SELECT COUNT(*) FROM meta").fetchone()[0],
+                "sightings": conn.execute("SELECT COUNT(*) FROM sightings").fetchone()[0],
+                "signal_events": conn.execute("SELECT COUNT(*) FROM signal_events").fetchone()[0],
+                "landings": conn.execute("SELECT COUNT(*) FROM landings").fetchone()[0],
+            }

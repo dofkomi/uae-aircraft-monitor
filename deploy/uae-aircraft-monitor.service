@@ -1,0 +1,21 @@
+[Unit]
+Description=UAE Aircraft Monitor Telegram Bot
+Documentation=https://t.me/ima_FL_bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/uae-aircraft-monitor
+EnvironmentFile=/opt/uae-aircraft-monitor/.env
+ExecStart=/opt/uae-aircraft-monitor/.venv/bin/python /opt/uae-aircraft-monitor/main.py
+Restart=always
+RestartSec=15
+TimeoutStopSec=30
+StandardOutput=append:/var/log/uae-aircraft-monitor.log
+StandardError=append:/var/log/uae-aircraft-monitor.log
+
+[Install]
+WantedBy=multi-user.target

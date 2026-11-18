@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+data/*.db
+data/chats.json
+data/airports_raw.csv

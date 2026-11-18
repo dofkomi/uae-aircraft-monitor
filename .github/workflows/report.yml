@@ -1,0 +1,39 @@
+name: UAE Aircraft Report
+
+# بديل مجاني تماماً (بلا بطاقة ائتمان): تقرير كل نصف ساعة عبر GitHub Actions.
+# أضف TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_IDS في Settings > Secrets and variables > Actions
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # الحفاظ على قاعدة البيانات بين التشغيلات (أحداث فقدان الإشارة والهبوط)
+      - uses: actions/cache@v4
+        with:
+          path: data/aircraft.db
+          key: uae-monitor-db-${{ github.run_id }}
+          restore-keys: uae-monitor-db-
+
+      - run: pip install -r requirements.txt
+
+      - name: جلب البيانات وإرسال التقرير
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+          USE_GEOCODING: '1'
+          USE_WATCHLIST: '1'
+        run: python main.py --send-once
