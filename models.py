@@ -74,6 +74,14 @@ class SignalEvent:
     country: str | None = None        # الدولة التي انقطع فوقها الإشارة
     country_code: str | None = None
     nearest_airport: str | None = None
+    nearest_airport_name: str | None = None
+    nearest_airport_country: str | None = None
+    nearest_airport_km: float | None = None
+    last_alt_ft: int | None = None
+    last_speed_kts: int | None = None
+    last_track: float | None = None
+    last_on_ground: bool = False
+    last_source: str = ""
     geo_source: str = ""
     created_at: datetime = field(default_factory=utcnow)
 
@@ -94,7 +102,11 @@ class LandingEvent:
     latitude: float | None = None
     longitude: float | None = None
     from_airport: str | None = None
+    from_airport_name: str | None = None
     from_country_code: str | None = None
+    from_at: datetime | None = None
+    leg_minutes: int | None = None
+    leg_distance_km: float | None = None
     divergence: bool = False   # هبطت بالخارج ثم واصلت إلى وجهة غير الإمارات
 
 

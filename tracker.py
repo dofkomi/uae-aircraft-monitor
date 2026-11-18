@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from adsb_sources import BaseSource, WatchlistSource
 from aircraft_db import AircraftDB
-from airports import AirportDB, country_name
+from airports import AirportDB, country_name, haversine_km
 from classifier import classify, is_uae_related
 from config import settings
 from geo import GeoResolver
@@ -47,6 +47,7 @@ class AircraftTracker:
 
         # حالة الهبوط/الوجهة
         self.on_ground_now: set[str] = set()
+        self.airborne_seen: set[str] = set()
         self.last_landing: dict[str, LandingEvent] = {}
 
         self.last_poll: datetime | None = None
@@ -122,6 +123,8 @@ class AircraftTracker:
                     self.classifications.pop(icao, None)
                     self.missed.pop(icao, None)
                     self.reported_missing.discard(icao)
+                    self.airborne_seen.discard(icao)
+                    self.on_ground_now.discard(icao)
                     continue
 
                 self.missed[icao] = self.missed.get(icao, 0) + 1
@@ -140,6 +143,11 @@ class AircraftTracker:
                         last_lat=state.latitude,
                         last_lon=state.longitude,
                         reason=self._guess_reason(state),
+                        last_alt_ft=state.altitude_ft,
+                        last_speed_kts=state.speed_kts,
+                        last_track=state.true_track,
+                        last_on_ground=state.on_ground,
+                        last_source=state.source,
                     )
                     new_events.append(event)
                     self.recent_events.append(event)
@@ -176,6 +184,11 @@ class AircraftTracker:
                 airport = self.airports.nearest(event.last_lat, event.last_lon, 50)
                 if airport:
                     event.nearest_airport = airport.ident
+                    event.nearest_airport_name = airport.name
+                    event.nearest_airport_country = airport.country_code
+                    event.nearest_airport_km = haversine_km(
+                        event.last_lat, event.last_lon, airport.lat, airport.lon
+                    )
             # تحديث الصف المُسجَّل مسبقاً بالبيانات الجغرافية دون تكراره
             self.store.update_event_geo(event)
 
@@ -194,6 +207,7 @@ class AircraftTracker:
 
             if not landed:
                 self.on_ground_now.discard(icao)
+                self.airborne_seen.add(icao)
                 continue
             if icao in self.on_ground_now:
                 continue  # نفس الهبوط في دورات متتالية
@@ -206,15 +220,41 @@ class AircraftTracker:
             if not airport:
                 continue
 
+            # لا نسجّل «هبوطاً» إلا إذا شوهدت الطائرة محلّقة قبله (في هذه
+            # العملية أو في الرصد المحفوظ)، حتى لا تُعدّ الطائرات المتوقفة
+            # على الأرض هبوطاً عند أول تشغيل أو في وضع الجدولة السحابية.
+            was_airborne = icao in self.airborne_seen or self.store.was_airborne_recently(
+                icao, min_alt_ft=settings.landing_alt_ft
+            )
+            if not was_airborne:
+                continue
+            if self.store.has_recent_landing(icao, airport.ident):
+                self.on_ground_now.add(icao)
+                self.airborne_seen.discard(icao)
+                continue
+
             self.on_ground_now.add(icao)
+            self.airborne_seen.discard(icao)
             previous = self.last_landing.get(icao)
             from_airport: str | None = None
+            from_airport_name: str | None = None
             from_country: str | None = None
+            from_at: datetime | None = None
+            leg_minutes: int | None = None
+            leg_distance_km: float | None = None
             divergence = False
 
             if previous and now - previous.at <= MAX_LEG_AGE:
                 from_airport = previous.airport_ident
+                from_airport_name = previous.airport_name
                 from_country = previous.airport_country_code
+                from_at = previous.at
+                leg_minutes = int((now - previous.at).total_seconds() // 60)
+                if previous.latitude is not None and previous.longitude is not None:
+                    leg_distance_km = haversine_km(
+                        previous.latitude, previous.longitude,
+                        state.latitude, state.longitude,
+                    )
                 if (
                     previous.airport_ident != airport.ident
                     and from_country != "AE"
@@ -236,7 +276,11 @@ class AircraftTracker:
                 latitude=state.latitude,
                 longitude=state.longitude,
                 from_airport=from_airport,
+                from_airport_name=from_airport_name,
                 from_country_code=from_country,
+                from_at=from_at,
+                leg_minutes=leg_minutes,
+                leg_distance_km=leg_distance_km,
                 divergence=divergence,
             )
             self.recent_landings.append(landing)

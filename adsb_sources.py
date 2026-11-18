@@ -30,6 +30,14 @@ def _first(data: dict, *keys: str, default=None):
     return default
 
 
+def _clean_callsign(value) -> str | None:
+    """تنظيف نداء الاستدعاء من الحشو والرموز غير الصالحة (مثل @ أو ~)."""
+    if value in (None, ""):
+        return None
+    text = "".join(ch for ch in str(value) if ch.isalnum()).strip()
+    return text or None
+
+
 def _to_int(value) -> int | None:
     if value in (None, ""):
         return None
@@ -46,6 +54,13 @@ def _to_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _ground_flag(row: dict, alt_baro) -> bool:
+    """هل الطائرة على الأرض؟ adsb.lol يستخدم alt_baro="ground" لهذا الغرض."""
+    if isinstance(alt_baro, str) and alt_baro.strip().lower() == "ground":
+        return True
+    return bool(row.get("on_ground", False))
 
 
 def _alt_to_m(value) -> float | None:
@@ -140,20 +155,24 @@ class AdsbLolSource(BaseSource):
             seen = _to_float(_first(row, "seen", "seen_pos"))
             last_contact = int(local_now - seen) if seen is not None else _to_int(row.get("last_contact"))
 
+            # adsb.lol يبلّغ عن الطائرات على الأرض بـ alt_baro = "ground"
+            alt_baro = _first(row, "alt_baro", "baro_altitude")
+            on_ground = _ground_flag(row, alt_baro)
+
             result.append(
                 AircraftState(
                     icao24=icao,
-                    callsign=str(callsign).strip() if callsign else None,
+                    callsign=_clean_callsign(callsign),
                     longitude=_to_float(_first(row, "lon", "longitude")),
                     latitude=_to_float(_first(row, "lat", "latitude")),
-                    baro_altitude=_alt_to_m(_first(row, "alt_baro", "baro_altitude")),
+                    baro_altitude=_alt_to_m(alt_baro),
                     geo_altitude=_alt_to_m(_first(row, "alt_geom", "geo_altitude")),
                     velocity=_kts_to_ms(_first(row, "gs", "velocity", "speed")),
                     true_track=_to_float(_first(row, "track", "true_track", "heading")),
                     vertical_rate=_fpm_to_ms(_first(row, "baro_rate", "vertical_rate")),
                     squawk=str(_first(row, "squawk", default="") or "") or None,
                     last_contact=last_contact,
-                    on_ground=bool(row.get("on_ground", False)),
+                    on_ground=on_ground,
                     source=self.name,
                     registration=_first(row, "r", "registration", "reg", default=None),
                     aircraft_type=_first(row, "t", "icao_type", "type", default=None),
@@ -230,7 +249,7 @@ def _parse_opensky_states(payload: dict, source_name: str) -> list[AircraftState
         result.append(
             AircraftState(
                 icao24=icao,
-                callsign=(str(row[1]).strip() if row[1] else None),
+                callsign=_clean_callsign(row[1]),
                 origin_country=row[2],
                 last_contact=_to_int(row[4]),
                 longitude=_to_float(row[5]),

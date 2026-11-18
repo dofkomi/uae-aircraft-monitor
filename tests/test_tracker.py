@@ -128,8 +128,12 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(event.geo_source, "nominatim")
 
     def test_foreign_landing_then_non_uae_destination(self) -> None:
-        # طائرة إماراتية: روما ← نجامينا (كلتاهما خارج الإمارات)
+        # طائرة إماراتية: تقلع ثم تهبط في روما، ثم تقلع وتهبط في نجامينا.
         callsign = "UAE777"
+        before_rome = AircraftState(
+            icao24="uae001", callsign=callsign, registration="A6-XXX",
+            latitude=41.9, longitude=12.4, baro_altitude=3000.0, velocity=200.0,
+        )
         at_rome = AircraftState(
             icao24="uae001", callsign=callsign, registration="A6-XXX",
             latitude=41.80, longitude=12.25, on_ground=True,
@@ -145,14 +149,16 @@ class TrackerTests(unittest.TestCase):
             latitude=12.13, longitude=15.04, on_ground=True,
             baro_altitude=0.0, velocity=0.0,
         )
-        source = FakeSource([at_rome])
+        source = FakeSource([before_rome])
         tracker = AircraftTracker([source], self.db, self.store, airports=FakeAirports())
 
-        asyncio.run(tracker.poll())
+        asyncio.run(tracker.poll())          # محلّقة قبل روما
+        source.states = [at_rome]
+        asyncio.run(tracker.poll())          # هبوط روما
         source.states = [en_route]
-        asyncio.run(tracker.poll())
+        asyncio.run(tracker.poll())          # إقلاع ومتابعة
         source.states = [at_ndjamena]
-        asyncio.run(tracker.poll())
+        asyncio.run(tracker.poll())          # هبوط نجامينا
 
         landings = tracker.recent_landings
         self.assertEqual(len(landings), 2)
@@ -161,6 +167,74 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(landings[1].from_airport, "LIRF")
         self.assertTrue(landings[1].divergence)
         self.assertTrue(landings[1].uae_related)
+        self.assertIsNotNone(landings[1].leg_distance_km)
+        self.assertIsNotNone(landings[1].leg_minutes)
+
+    def test_parked_aircraft_not_reported_as_landing(self) -> None:
+        """طائرة متوقفة على الأرض عند أول تشغيل لا تُعدّ «هبوطاً»."""
+        parked = AircraftState(
+            icao24="park01", callsign="PARK1", latitude=25.25, longitude=55.36,
+            on_ground=True, baro_altitude=0.0, velocity=0.0,
+        )
+        source = FakeSource([parked])
+        tracker = AircraftTracker([source], self.db, self.store, airports=FakeAirports())
+        asyncio.run(tracker.poll())
+        self.assertEqual(tracker.recent_landings, [])
+
+    def test_report_contains_detailed_sections(self) -> None:
+        from reporter import build_report
+
+        state = AircraftState(
+            icao24="rep001", callsign="UAE123", registration="A6-ABC",
+            aircraft_type="B738", latitude=25.0, longitude=55.0,
+            baro_altitude=10000.0, velocity=230.0, true_track=315.0,
+            vertical_rate=5.0, squawk="7700", origin_country="United Arab Emirates",
+        )
+        source = FakeSource([state])
+        tracker = AircraftTracker(
+            [source], self.db, self.store, geo=FakeGeo(), airports=FakeAirports()
+        )
+        asyncio.run(tracker.poll())
+        text = build_report(tracker)
+        for needle in (
+            "الملخص التنفيذي",
+            "UAE123",
+            "A6-ABC",
+            "B738",
+            "أكواد طوارئ",
+            "الطائرات المرتبطة بالإمارات",
+            "صعود",
+            "7700",
+        ):
+            self.assertIn(needle, text)
+
+    def test_parked_aircraft_shown_as_on_ground(self) -> None:
+        from reporter import build_report
+
+        parked = AircraftState(
+            icao24="park02", callsign="A6-PRK", registration="A6-PRK",
+            latitude=25.25, longitude=55.36, on_ground=True,
+            baro_altitude=0.0, velocity=0.0,
+        )
+        source = FakeSource([parked])
+        tracker = AircraftTracker([source], self.db, self.store, airports=FakeAirports())
+        asyncio.run(tracker.poll())
+        text = build_report(tracker)
+        self.assertIn("على الأرض", text)
+
+
+class AdsbParsingTests(unittest.TestCase):
+    def test_ground_altitude_marks_on_ground(self) -> None:
+        from adsb_sources import _alt_to_m, _ground_flag
+
+        self.assertTrue(_ground_flag({"alt_baro": "ground"}, "ground"))
+        self.assertEqual(_alt_to_m("ground"), 0.0)
+
+    def test_airborne_altitude_not_on_ground(self) -> None:
+        from adsb_sources import _ground_flag
+
+        self.assertFalse(_ground_flag({"alt_baro": 30000}, 30000))
+        self.assertFalse(_ground_flag({}, None))
 
 
 class ClassifierTests(unittest.TestCase):

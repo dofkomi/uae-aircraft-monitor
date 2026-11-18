@@ -67,6 +67,14 @@ class Store:
                     country         TEXT,
                     country_code    TEXT,
                     nearest_airport TEXT,
+                    nearest_airport_name    TEXT,
+                    nearest_airport_country TEXT,
+                    nearest_airport_km      REAL,
+                    last_alt_ft     INTEGER,
+                    last_speed_kts  INTEGER,
+                    last_track      REAL,
+                    last_on_ground  INTEGER,
+                    last_source     TEXT,
                     geo_source      TEXT,
                     created_at      INTEGER NOT NULL
                 );
@@ -85,7 +93,11 @@ class Store:
                     lat                REAL,
                     lon                REAL,
                     from_airport       TEXT,
+                    from_airport_name  TEXT,
                     from_country       TEXT,
+                    from_at            INTEGER,
+                    leg_minutes        INTEGER,
+                    leg_distance_km    REAL,
                     divergence         INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_landings_time ON landings(at);
@@ -107,6 +119,34 @@ class Store:
                 );
                 """
             )
+            self._migrate(conn)
+
+    _EXTRA_COLUMNS: dict[str, dict[str, str]] = {
+        "signal_events": {
+            "nearest_airport_name": "TEXT",
+            "nearest_airport_country": "TEXT",
+            "nearest_airport_km": "REAL",
+            "last_alt_ft": "INTEGER",
+            "last_speed_kts": "INTEGER",
+            "last_track": "REAL",
+            "last_on_ground": "INTEGER",
+            "last_source": "TEXT",
+        },
+        "landings": {
+            "from_airport_name": "TEXT",
+            "from_at": "INTEGER",
+            "leg_minutes": "INTEGER",
+            "leg_distance_km": "REAL",
+        },
+    }
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """يضيف الأعمدة الجديدة لقواعد البيانات القديمة دون فقدان البيانات."""
+        for table, columns in self._EXTRA_COLUMNS.items():
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for name, sqltype in columns.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sqltype}")
 
     # ---------- بيانات تعريف الطائرة ----------
     def get_meta(self, icao24: str) -> dict | None:
@@ -153,8 +193,11 @@ class Store:
             conn.execute(
                 "INSERT INTO signal_events "
                 "(icao24, callsign, classification, last_seen, lat, lon, reason, "
-                "country, country_code, nearest_airport, geo_source, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "country, country_code, nearest_airport, nearest_airport_name, "
+                "nearest_airport_country, nearest_airport_km, last_alt_ft, "
+                "last_speed_kts, last_track, last_on_ground, last_source, "
+                "geo_source, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     event.icao24,
                     event.callsign,
@@ -166,23 +209,35 @@ class Store:
                     event.country,
                     event.country_code,
                     event.nearest_airport,
+                    event.nearest_airport_name,
+                    event.nearest_airport_country,
+                    event.nearest_airport_km,
+                    event.last_alt_ft,
+                    event.last_speed_kts,
+                    event.last_track,
+                    int(event.last_on_ground),
+                    event.last_source,
                     event.geo_source,
                     int(event.created_at.timestamp()),
                 ),
             )
 
     def update_event_geo(self, event: SignalEvent) -> None:
-        """يضيف اسم الدولة/Mطار إلى أحدث صف لهذا الحدث بعد الجلب الجغرافي."""
+        """يضيف اسم الدولة/المطار إلى أحدث صف لهذا الحدث بعد الجلب الجغرافي."""
         with self._tx() as conn:
             conn.execute(
                 "UPDATE signal_events SET country = ?, country_code = ?, "
-                "nearest_airport = ?, geo_source = ? "
+                "nearest_airport = ?, nearest_airport_name = ?, "
+                "nearest_airport_country = ?, nearest_airport_km = ?, geo_source = ? "
                 "WHERE id = (SELECT id FROM signal_events WHERE icao24 = ? "
                 "ORDER BY created_at DESC, id DESC LIMIT 1)",
                 (
                     event.country,
                     event.country_code,
                     event.nearest_airport,
+                    event.nearest_airport_name,
+                    event.nearest_airport_country,
+                    event.nearest_airport_km,
                     event.geo_source,
                     event.icao24,
                 ),
@@ -194,8 +249,9 @@ class Store:
                 "INSERT INTO landings "
                 "(icao24, callsign, registration, classification, uae_related, "
                 "airport_ident, airport_name, airport_country, at, lat, lon, "
-                "from_airport, from_country, divergence) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "from_airport, from_airport_name, from_country, from_at, "
+                "leg_minutes, leg_distance_km, divergence) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     landing.icao24,
                     landing.callsign,
@@ -209,10 +265,44 @@ class Store:
                     landing.latitude,
                     landing.longitude,
                     landing.from_airport,
+                    landing.from_airport_name,
                     landing.from_country_code,
+                    int(landing.from_at.timestamp()) if landing.from_at else None,
+                    landing.leg_minutes,
+                    landing.leg_distance_km,
                     int(landing.divergence),
                 ),
             )
+
+    def was_airborne_recently(
+        self, icao24: str, within_minutes: int = 45, min_alt_ft: int = 1200
+    ) -> bool:
+        """هل شوهدت الطائرة محلّقة (فوق ارتفاع الهبوط) خلال الفترة الأخيرة؟
+
+        يُستخدم لمنع اعتبار الطائرات المتوقفة على الأرض «هبوطاً» عند أول
+        تشغيل، خصوصاً في وضع الجدولة السحابية حيث تُفقد الحالة من الذاكرة.
+        """
+        cutoff = int(time.time()) - within_minutes * 60
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM sightings WHERE icao24 = ? AND seen_at >= ? "
+                "AND altitude_ft IS NOT NULL AND altitude_ft > ? LIMIT 1",
+                (icao24, cutoff, min_alt_ft),
+            ).fetchone()
+            return bool(row)
+
+    def has_recent_landing(
+        self, icao24: str, airport_ident: str, within_minutes: int = 180
+    ) -> bool:
+        """يمنع تسجيل نفس الهبوط أكثر من مرة بين تشغيلات متتالية."""
+        cutoff = int(time.time()) - within_minutes * 60
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM landings WHERE icao24 = ? AND airport_ident = ? "
+                "AND at >= ? LIMIT 1",
+                (icao24, airport_ident, cutoff),
+            ).fetchone()
+            return bool(row)
 
     def landings_since(self, since_ts: int, limit: int = 100) -> list[dict]:
         with self._tx() as conn:
