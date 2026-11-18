@@ -116,7 +116,7 @@ class Settings:
         self.ai_report_mode: str = (
             os.getenv("AI_REPORT_MODE", "both").strip().lower() or "both"
         )
-        self.ai_max_tokens: int = max(200, _as_int("AI_MAX_TOKENS", 2048))
+        self.ai_max_tokens: int = max(200, _as_int("AI_MAX_TOKENS", 3000))
         self.ai_timeout_seconds: int = max(10, _as_int("AI_TIMEOUT_SECONDS", 45))
         self.ai_temperature: float = _as_float("AI_TEMPERATURE", 0.3)
         self.gemini_api_key: str = os.getenv("GEMINI_API_KEY", "").strip()

@@ -65,6 +65,7 @@ async def _send_once() -> None:
     from telegram import Bot
 
     from bot import ReportBot, split_message
+    from report_docs import send_documents
 
     tracker = build_tracker()
     await tracker.poll()
@@ -84,6 +85,10 @@ async def _send_once() -> None:
                         parse_mode="HTML",
                         disable_web_page_preview=True,
                     )
+            # نسختان قابلتان للاستغلال: PDF للطباعة وDOCX للتعديل
+            await send_documents(
+                tg, chat_id, messages, settings.report_interval_minutes
+            )
     log.info("تم إرسال %d رسالة إلى %d محادثة", len(messages), len(recipients))
 
 

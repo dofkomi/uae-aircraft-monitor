@@ -107,6 +107,120 @@ def classify(state: AircraftState) -> str:
     return UNKNOWN
 
 
+# ---------------------------------------------------------------------------
+# تنبؤ احتمالي بالطابع العسكري (لا يعتمد على نوع الطائرة وحده)
+# ---------------------------------------------------------------------------
+VERDICTS = (
+    ("military", "عسكرية (مؤكد)", 0.80),
+    ("likely_military", "عسكرية مرجّحة", 0.60),
+    ("uncertain", "غير حاسمة", 0.40),
+    ("likely_civilian", "مدنية مرجّحة", 0.20),
+    ("civilian", "مدنية (مؤكد)", 0.00),
+)
+
+# نطاقات أكواد IFF/Squawk المستخدمة عسكرياً في كثير من الدول (مؤشر ضعيف)
+MILITARY_SQUAWKS = ("4000", "4001", "4100", "4200", "4300", "4400", "4500", "4600", "4700")
+
+
+def _verdict(score: float) -> tuple[str, str]:
+    for key, text, threshold in VERDICTS:
+        if score >= threshold:
+            return key, text
+    return "civilian", "مدنية (مؤكد)"
+
+
+def assess(state: AircraftState) -> dict:
+    """تقييم احتمالي (0..1) لكون الطائرة عسكرية، مع أسباب مقروءة.
+
+    يعتمد على دراسة الحركة وبيانات التعريف معاً:
+    نوع الطائرة، المشغّل/النموذج، النداء، التسجيل، وجود نداء أصلاً،
+    وأكواد Squawk العسكرية، ونمط الطيران (ارتفاع منخفض جداً/دوران).
+    """
+    type_code = _normalize_type(state.aircraft_type)
+    haystack = " ".join(
+        str(value or "").lower()
+        for value in (state.model, state.manufacturer, state.origin_country)
+    )
+    callsign = (state.callsign or "").upper().strip()
+    registration = (state.registration or "").upper().strip()
+    score = 0.0
+    reasons: list[str] = []
+
+    # 1) نوع الطائرة
+    if type_code in MILITARY_TYPES:
+        score += 0.85
+        reasons.append(f"نوع عسكري معروف ({state.aircraft_type})")
+    elif type_code in CIVILIAN_TYPES:
+        score -= 0.70
+        reasons.append(f"نوع مدني شائع ({state.aircraft_type})")
+
+    # 2) المشغّل/النموذج
+    if any(word in haystack for word in MILITARY_KEYWORDS):
+        score += 0.55
+        reasons.append("اسم المشغّل/النموذج يشير لجهة عسكرية")
+
+    # 3) النداء
+    if callsign:
+        if any(callsign.startswith(prefix) for prefix in MILITARY_CALL_PATTERNS):
+            score += 0.50
+            reasons.append(f"نداء عسكري ({callsign})")
+        elif any(callsign.startswith(prefix) for prefix in UAE_CIVIL_CALLSIGNS):
+            score -= 0.55
+            reasons.append(f"نداء خطوط مدنية ({callsign})")
+        elif callsign.replace("-", "").isalnum() and len(callsign) <= 4 and not callsign[:3].isalpha():
+            score += 0.15
+            reasons.append("نداء غير قياسي")
+    else:
+        # طائرات كثيرة عسكرية تبث بلا نداء، لكن هذا وحده لا يكفي
+        score += 0.20
+        reasons.append("لا تبث نداءً (شائع لدى العسكري)")
+
+    # 4) التسجيل
+    if registration:
+        if registration.startswith(("MIL", "AF-")):
+            score += 0.50
+            reasons.append(f"تسجيل عسكري ({registration})")
+        elif registration.startswith("A6-"):
+            score -= 0.55
+            reasons.append("تسجيل مدني إماراتي (A6-)")
+    elif callsign:
+        score += 0.10
+        reasons.append("لا تسجيل معلن")
+
+    # 5) أكواد Squawk
+    if (state.squawk or "") in MILITARY_SQUAWKS:
+        score += 0.25
+        reasons.append(f"squawk عسكري ({state.squawk})")
+
+    # 6) نمط الحركة
+    alt = state.altitude_ft
+    speed = state.speed_kts
+    if alt is not None and not state.on_ground:
+        if alt < 500 and (speed or 0) > 200:
+            score += 0.20
+            reasons.append("طيران منخفض جداً بسرعة عالية (نمط تدريب/اعتراض)")
+        elif alt > 45000:
+            score += 0.15
+            reasons.append("ارتفاع تشغيلي عالٍ غير معتاد للمدني")
+
+    score = max(0.0, min(1.0, round(score, 2)))
+    key, text = _verdict(score)
+    return {
+        "icao24": state.icao24,
+        "label": state.display_name,
+        "score": score,
+        "verdict": key,
+        "verdict_text": text,
+        "reasons": reasons[:4],
+    }
+
+
+def predict_military(state: AircraftState) -> tuple[bool, float, list[str]]:
+    """نسخة مختصرة: (هل عسكرية؟، الثقة، الأسباب)."""
+    result = assess(state)
+    return result["verdict"] in ("military", "likely_military"), result["score"], result["reasons"]
+
+
 def label(classification: str) -> str:
     return {MILITARY: "عسكرية", CIVILIAN: "مدنية", UNKNOWN: "غير مصنّفة"}.get(
         classification, "غير مصنّفة"

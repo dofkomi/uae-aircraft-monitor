@@ -192,6 +192,8 @@ class Store:
             "leg_distance_km": "REAL",
             "divergence": "INTEGER",
             "route_json": "TEXT",
+            "new_airport": "INTEGER",
+            "unplanned": "INTEGER",
         },
     }
 
@@ -309,8 +311,9 @@ class Store:
                 "(icao24, callsign, registration, classification, uae_related, "
                 "airport_ident, airport_name, airport_country, at, lat, lon, "
                 "from_airport, from_airport_name, from_country, from_at, "
-                "leg_minutes, leg_distance_km, divergence, route_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "leg_minutes, leg_distance_km, divergence, route_json, "
+                "new_airport, unplanned) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     landing.icao24,
                     landing.callsign,
@@ -331,8 +334,30 @@ class Store:
                     landing.leg_distance_km,
                     int(landing.divergence),
                     route_to_json(landing.route),
+                    int(landing.new_airport),
+                    int(landing.unplanned),
                 ),
             )
+
+    def airport_visit_count(self, icao24: str, airport_ident: str) -> int:
+        """كم مرة هبطت هذه الطائرة في هذا المطار سابقاً (كل التاريخ المخزّن)."""
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM landings WHERE icao24 = ? AND airport_ident = ?",
+                (icao24, airport_ident),
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
+    def airports_seen(self, icao24: str, limit: int = 30) -> list[str]:
+        """قائمة المطارات التي هبطت فيها الطائرة سابقاً (لرصد الوجهات الجديدة)."""
+        with self._tx() as conn:
+            rows = conn.execute(
+                "SELECT airport_ident, MAX(at) AS last FROM landings "
+                "WHERE icao24 = ? AND airport_ident IS NOT NULL "
+                "GROUP BY airport_ident ORDER BY last DESC LIMIT ?",
+                (icao24, limit),
+            ).fetchall()
+            return [row["airport_ident"] for row in rows]
 
     def was_airborne_recently(
         self, icao24: str, within_minutes: int = 45, min_alt_ft: int = 1200

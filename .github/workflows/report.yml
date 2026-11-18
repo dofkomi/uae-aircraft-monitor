@@ -48,7 +48,39 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: python main.py --send-once
+        run: |
+          set -o pipefail
+          python main.py --send-once 2>&1 | tee data/last-run.log
+
+      # عند الفشل نكتب سجلاً مختصراً ونرفعه إلى المستودع، لأن سجلات Actions
+      # تحتاج تسجيل دخول. الملف يظهر في data/last-failure.md بعد أي فشل.
+      - name: حفظ سبب الفشل في المستودع
+        if: failure()
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          mkdir -p data
+          {
+            echo "# آخر فشل: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo
+            echo "| المتغير | موجود؟ |"
+            echo "|---|---|"
+            echo "| TELEGRAM_BOT_TOKEN | $([ -n "$TELEGRAM_BOT_TOKEN" ] && echo نعم || echo **لا**) |"
+            echo "| TELEGRAM_CHAT_IDS | $([ -n "$TELEGRAM_CHAT_IDS" ] && echo نعم || echo **لا**) |"
+            echo "| GEMINI_API_KEY | $([ -n "$GEMINI_API_KEY" ] && echo نعم || echo **لا**) |"
+            echo
+            echo '```'
+            tail -n 150 data/last-run.log 2>/dev/null || echo "لا يوجد سجل"
+            echo '```'
+          } > data/last-failure.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f data/last-failure.md
+          git commit -m "ci: record last failure [skip ci]" || exit 0
+          git push || true
 
       # GitHub يعطّل الجدولة بعد 60 يوماً من عدم النشاط؛ نحدّث ملفاً مرة كل ~30 يوماً.
       - name: إبقاء الجدولة نشطة

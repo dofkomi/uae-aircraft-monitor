@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from airports import country_name, haversine_km
-from classifier import is_uae_related, is_uae_related_event, label
+from classifier import assess, is_uae_related, is_uae_related_event, label
 from config import settings
 from country_shapes import default_shapes, flag_emoji
 from models import AircraftState, LandingEvent, SignalEvent
@@ -330,6 +330,7 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
     diverged = [item for item in landings if item.divergence]
     uae_diverged = [item for item in diverged if item.uae_related]
     other_diverged = [item for item in diverged if not item.uae_related]
+    unplanned = [item for item in landings if item.unplanned]
     def _event_country(event: SignalEvent) -> str:
         """دولة آخر موقع: المخزّنة، أو تُحدَّد محلياً، أو «فوق المياه»."""
         if event.country:
@@ -378,7 +379,8 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         f"<b>{len(by_country)}</b> دولة · طائرات أخرى: <b>{len(other_events)}</b>"
     )
     lines.append(
-        f"  • هبوطات: <b>{len(landings)}</b> · وجهات غير الإمارات: <b>{len(diverged)}</b>"
+        f"  • هبوطات: <b>{len(landings)}</b> · وجهات غير الإمارات: <b>{len(diverged)}</b> "
+        f"· غير مبرمجة سابقاً: <b>{len(unplanned)}</b>"
     )
     if emergency:
         codes = ", ".join(sorted({s.squawk or "" for s in emergency}))
@@ -501,6 +503,51 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
             lines.append(_landing_detail(item))
     if not diverged:
         lines.append("  • لا توجد حالات هبوط في الخارج تلتها وجهة غير الإمارات.")
+    lines.append("")
+
+    # ── وجهات/رحلات غير مبرمجة سابقاً ──
+    uae_unplanned = [item for item in unplanned if item.uae_related]
+    lines.append("🆕 <b>وجهات غير مبرمجة سابقاً (توقّف مفاجئ خارج النمط)</b>")
+    if unplanned:
+        for item in uae_unplanned[: settings.max_report_aircraft]:
+            reason = item.unplanned_reason or "غير معروف"
+            lines.append(
+                f"  • 🇦🇪 <b>{_esc(item.registration or item.callsign or item.icao24)}</b> — "
+                f"{_esc(item.airport_name or item.airport_ident or 'مطار غير معروف')} "
+                f"({_esc(item.airport_country_code or '—')}) · {_esc(reason)}"
+            )
+        others = [item for item in unplanned if not item.uae_related]
+        if others:
+            lines.append(
+                f"  <i>طائرات أخرى بوجهات جديدة: {len(others)} — تُسجَّل في قاعدة البيانات.</i>"
+            )
+    else:
+        lines.append("  • لا توجد هبوطات في مطارات جديدة أو مخالفة للمسار خلال الفترة.")
+    lines.append("")
+
+    # ── تنبؤ الطابع العسكري ──
+    lines.append("🔎 <b>تنبؤ الطابع العسكري (حركة + بيانات تعريف)</b>")
+    predictions = []
+    for state in states:
+        if tracker.classifications.get(state.icao24) == "military":
+            continue  # المصنّفة عسكرياً تُعرض في قسمها أدناه
+        result = assess(state)
+        if result["score"] >= 0.40:
+            predictions.append(result)
+    predictions.sort(key=lambda item: item["score"], reverse=True)
+    if predictions:
+        lines.append(
+            "  <i>تقدير احتمالي آلي من نمط الطيران والنداء والتسجيل والنوع — "
+            "ليس تأكيداً.</i>"
+        )
+        for result in predictions[:10]:
+            reasons = " · ".join(result["reasons"][:3]) or "لا مؤشرات قوية"
+            lines.append(
+                f"  • <b>{_esc(result['label'])}</b> — {_esc(result['verdict_text'])} "
+                f"({int(result['score'] * 100)}%) · {_esc(reasons)}"
+            )
+    else:
+        lines.append("  • لا توجد مؤشرات عسكرية كافية على الطائرات غير المصنّفة.")
     lines.append("")
 
     # ── الطائرات المرتبطة بالإمارات ──

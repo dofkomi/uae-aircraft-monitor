@@ -189,6 +189,21 @@ class LandingEvent:
     leg_distance_km: float | None = None
     divergence: bool = False   # هبطت بالخارج ثم واصلت إلى وجهة غير الإمارات
     route: "RouteInfo | None" = None   # المسار المجدول (OSINT) إن عُرف
+    new_airport: bool = False  # أول مرة تُرصد هذه الطائرة في هذا المطار
+    unplanned: bool = False    # وجهة غير مبرمجة: مطار جديد أو مخالف للمسار
+
+    @property
+    def unplanned_reason(self) -> str:
+        """سبب اعتبار الهبوط غير مبرمج (نص عربي مختصر)."""
+        reasons: list[str] = []
+        if self.route_mismatch:
+            reasons.append(
+                f"المسار المجدول ينتهي في {self.route.dest_icao} "  # type: ignore[union-attr]
+                f"لكنها هبطت في {self.airport_ident}"
+            )
+        if self.new_airport:
+            reasons.append("مطار لم تُرصد فيه هذه الطائرة من قبل")
+        return " · ".join(reasons)
 
     @property
     def route_mismatch(self) -> bool:

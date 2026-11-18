@@ -16,6 +16,7 @@ from telegram.ext import Application, ApplicationBuilder, CommandHandler, Contex
 
 from config import settings
 from reporter import build_messages, build_status
+from report_docs import send_documents
 from tracker import AircraftTracker
 
 log = logging.getLogger(__name__)
@@ -266,6 +267,12 @@ class ReportBot:
                         )
                     except Exception as exc:  # noqa: BLE001
                         log.warning("تعذّر الإرسال إلى %s: %s", chat_id, exc)
+            try:
+                await send_documents(
+                    context.bot, chat_id, messages, settings.report_interval_minutes
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("تعذّر إرسال ملفات التقرير إلى %s: %s", chat_id, exc)
 
     # ------------------------------------------------------------------ إعداد
     async def _post_init(self, application: Application) -> None:

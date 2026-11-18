@@ -173,7 +173,16 @@ class AircraftTracker:
             new_landings = self._detect_landings(merged, now)
             await self._enrich_landings(new_landings)
             for landing in new_landings:
+                # يُحسب بعد جلب المسار المجدول: مخالفة الوجهة أو مطار جديد
+                landing.unplanned = landing.route_mismatch or landing.new_airport
                 self.store.add_landing(landing)
+                if landing.unplanned:
+                    log.info(
+                        "وجهة غير مبرمجة: %s → %s (%s)",
+                        landing.icao24,
+                        landing.airport_ident,
+                        landing.unplanned_reason,
+                    )
 
             self.current = merged
             self.last_poll = now
@@ -420,6 +429,10 @@ class AircraftTracker:
                     divergence = True
 
             uae_related = is_uae_related(state)
+            # «وجهة غير مبرمجة سابقاً»: مطار لم تُرصد فيه هذه الطائرة قبل الآن.
+            # نشترط وجود تاريخ سابق للطائرة حتى لا تُعدّ أول رحلة مرصودة شذوذاً.
+            prior_visits = self.store.airport_visit_count(icao, airport.ident)
+            new_airport = prior_visits == 0 and bool(self.store.airports_seen(icao, limit=1))
             landing = LandingEvent(
                 icao24=icao,
                 callsign=state.callsign,
@@ -439,6 +452,7 @@ class AircraftTracker:
                 leg_minutes=leg_minutes,
                 leg_distance_km=leg_distance_km,
                 divergence=divergence,
+                new_airport=new_airport,
             )
             self.recent_landings.append(landing)
             self.recent_landings = self.recent_landings[-MAX_RECENT_EVENTS:]

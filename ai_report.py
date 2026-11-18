@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 
 import aiohttp
 
-from classifier import is_uae_related, is_uae_related_event
+from classifier import assess, is_uae_related, is_uae_related_event
 from config import settings
 from country_shapes import default_shapes, flag_emoji
 from models import AircraftState, LandingEvent, RouteInfo, SignalEvent
@@ -52,6 +52,11 @@ SYSTEM_PROMPT = """\
    عالمياً، وهل هبطت في الخارج ثم غيّرت وجهتها.
 5. اذكر أرقاماً محددة عند الإشارة إلى ظاهرة (مثال: «3 طائرات»).
 6. لا تتجاوز 380 كلمة.
+7. عندما يُطلب منك تقدير الطابع العسكري، استند إلى مؤشرات مركّبة (النوع،
+   المشغّل، النداء، التسجيل، غياب النداء، squawk، نمط الارتفاع/السرعة)
+   وأعطِ درجة احتمالية بكلمة (مرجّح/محتمل/مستبعد) — لا تجزم.
+8. رصد الوجهات غير المبرمجة: قارن الهبوط الفعلي بالمسار المجدول وبمطار
+   جديد لم تُرصد فيه الطائرة سابقاً، واذكر السبب.
 
 صيغة الإخراج (تُحوَّل آلياً إلى تنسيق تليجرام):
 ## عنوان قصير
@@ -264,7 +269,42 @@ def _landing_brief(item: LandingEvent) -> dict:
         "divergence": item.divergence,
         "scheduled_route": _route_text(item.route),
         "route_mismatch": item.route_mismatch,
+        "new_airport": item.new_airport,
+        "unplanned": item.unplanned,
+        "unplanned_reason": item.unplanned_reason,
     }
+
+
+def _military_suspects(tracker, states: list[AircraftState]) -> list[dict]:
+    """مرشّحون للطابع العسكري من غير المصنّفين، مرتّبون بالاحتمال المحلي.
+
+    النموذج اللغوي يرى هذه المؤشرات ثم يصدر تقديره النهائي بنفسه.
+    """
+    out: list[dict] = []
+    for state in states:
+        if tracker.classifications.get(state.icao24) == "military":
+            continue
+        result = assess(state)
+        if result["score"] < 0.30:
+            continue
+        out.append(
+            {
+                "aircraft": state.display_name,
+                "type": state.aircraft_type,
+                "callsign": state.callsign,
+                "registration": state.registration,
+                "operator": state.operator,
+                "alt_ft": state.altitude_ft,
+                "speed_kts": state.speed_kts,
+                "on_ground": state.on_ground,
+                "squawk": state.squawk,
+                "local_score": result["score"],
+                "local_verdict": result["verdict_text"],
+                "reasons": result["reasons"],
+            }
+        )
+    out.sort(key=lambda item: item["local_score"], reverse=True)
+    return out[:12]
 
 
 def build_snapshot(tracker, period_minutes: int | None = None) -> dict:
@@ -332,6 +372,7 @@ def build_snapshot(tracker, period_minutes: int | None = None) -> dict:
             _aircraft_brief(s, "military")
             for s in sorted(military, key=lambda s: s.display_name)[:10]
         ],
+        "military_suspects": _military_suspects(tracker, states),
         "signal_loss_uae": [
             _event_brief(e, now)
             for e in sorted(uae_events, key=lambda e: -e.last_seen.timestamp())[:10]
@@ -355,7 +396,14 @@ def build_user_prompt(snapshot: dict) -> str:
     return (
         "هذه لقطة بيانات مرصودة الآن. اكتب دراسة تحليلية عربية موجزة.\n"
         "ابدأ بـ «## الخلاصة» ثم «## الطائرات الإماراتية» ثم "
-        "«## انقطاع الإشارة» ثم «## الهبوطات والوجهات» ثم «## ما يستحق المتابعة».\n"
+        "«## انقطاع الإشارة» ثم «## الهبوطات والوجهات» ثم "
+        "«## تقدير الطابع العسكري» ثم «## وجهات غير مبرمجة» ثم "
+        "«## ما يستحق المتابعة».\n"
+        "في «تقدير الطابع العسكري»: استخدم القائمة military_suspects "
+        "(ودرجة local_score كمرجع) وقدّم تقديرك أنت لكل طائرة مع سبب موجز، "
+        "واذكر أن كثيراً من العسكري لا يبث ADS-B أصلاً.\n"
+        "في «وجهات غير مبرمجة»: اذكر الطائرات التي وردت بـ unplanned=true "
+        "مع سبب كل واحدة (مخالفة المسار أو مطار جديد).\n"
         "إن كان قسم بلا بيانات فاكتب سطراً واحداً يوضّح ذلك.\n\n"
         f"البيانات:\n{payload}"
     )
@@ -612,6 +660,34 @@ def build_local_analysis(snapshot: dict) -> str:
     else:
         lines.append("- لا توجد هبوطات مرصودة خلال الفترة.")
 
+    lines.append("## تقدير الطابع العسكري")
+    suspects = snapshot.get("military_suspects") or []
+    if suspects:
+        for item in suspects[:6]:
+            reasons = "، ".join(item.get("reasons") or []) or "مؤشرات محدودة"
+            lines.append(
+                f"- {item['aircraft']}: تقدير محلي {item.get('local_verdict')} "
+                f"({int((item.get('local_score') or 0) * 100)}%) — {reasons}."
+            )
+        lines.append(
+            "- تقدير احتمالي من نمط الحركة وبيانات التعريف، وليس تأكيداً؛ "
+            "وكثير من الطائرات العسكرية لا تبث ADS-B أصلاً."
+        )
+    else:
+        lines.append("- لا مؤشرات كافية على طابع عسكري لغير المصنّفة في هذه اللحظة.")
+
+    lines.append("## وجهات غير مبرمجة")
+    unplanned = [item for item in landings if item.get("unplanned")]
+    if unplanned:
+        for item in unplanned[:6]:
+            flag = "إماراتية" if item.get("uae_related") else "أخرى"
+            lines.append(
+                f"- {item['callsign']} ({flag}) توقّفت في {item.get('landed_at')}: "
+                f"{item.get('unplanned_reason') or 'سبب غير محدد'}."
+            )
+    else:
+        lines.append("- لا توقّفات في مطارات جديدة أو مخالفة للمسار خلال الفترة.")
+
     lines.append("## ما يستحق المتابعة")
     followups = 0
     if uae_events:
@@ -624,6 +700,9 @@ def build_local_analysis(snapshot: dict) -> str:
         lines.append(
             "- طائرات ما تزال تبث عالمياً: غيابها محلياً سببه تغطية المستقبلات لا إغلاق البث."
         )
+        followups += 1
+    if any(item.get("unplanned") for item in landings):
+        lines.append("- توقّفات في مطارات جديدة أو مخالفة للمسار: تُستحق مراجعة سبب التحويل.")
         followups += 1
     if not followups:
         lines.append(
