@@ -41,6 +41,7 @@ jobs:
       # GitHub يعطّل الجدولة بعد 60 يوماً من عدم النشاط؛ نحدّث ملفاً مرة كل ~30 يوماً.
       - name: إبقاء الجدولة نشطة
         if: github.event_name == 'schedule'
+        continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
