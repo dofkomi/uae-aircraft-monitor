@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from adsb_sources import BaseSource, WatchlistSource
@@ -88,12 +89,20 @@ class AircraftTracker:
     # ------------------------------------------------------------------
     async def poll(self) -> dict[str, AircraftState]:
         async with self._lock:
+            # توقيت المراحل: التشغيل السحابي يحتاج معرفة أي مرحلة تستهلك الوقت.
+            started = time.perf_counter()
+            timings: dict[str, float] = {}
+
+            def mark(phase: str) -> None:
+                timings[phase] = round(time.perf_counter() - started, 1)
+
             if self.osint:
                 self.osint.reset_poll_budget()
             results = await asyncio.gather(
                 *(source.fetch() for source in self.sources),
                 return_exceptions=True,
             )
+            mark("fetch")
 
             merged: dict[str, AircraftState] = {}
             for source, result in zip(self.sources, results):
@@ -122,9 +131,11 @@ class AircraftTracker:
                     *(self.db.enrich(state) for state in enrich_targets),
                     return_exceptions=True,
                 )
+            mark("enrich")
 
             # إثراء OSINT: مسار الرحلة للطائرات الإماراتية (adsbdb، مجاني)
             await self._enrich_routes(merged)
+            mark("routes")
 
             now = datetime.now(timezone.utc)
             seen_ids = set(merged)
@@ -196,10 +207,12 @@ class AircraftTracker:
                     log.info("حدث فقدان إشارة: %s (%s)", icao, event.reason)
 
             await self._enrich_events(new_events)
+            mark("events")
 
             # كشف الهبوط وتغيّر الوجهة
             new_landings = self._detect_landings(merged, now)
             await self._enrich_landings(new_landings)
+            mark("landings")
             for landing in new_landings:
                 # يُحسب بعد جلب المسار المجدول: مخالفة الوجهة أو مطار جديد
                 landing.unplanned = landing.route_mismatch or landing.new_airport
@@ -215,6 +228,18 @@ class AircraftTracker:
             self.current = merged
             self.last_poll = now
             self.poll_count += 1
+            mark("total")
+            log.info(
+                "دورة جلب #%d: %d طائرة · مصادر %ss · إثراء %ss · مسارات %ss · "
+                "أحداث %ss · إجمالي %ss",
+                self.poll_count,
+                len(merged),
+                timings.get("fetch", 0),
+                timings.get("enrich", 0),
+                timings.get("routes", 0),
+                timings.get("events", 0),
+                timings.get("total", 0),
+            )
             return merged
 
     # ------------------------------------------------------------------

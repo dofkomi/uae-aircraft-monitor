@@ -11,6 +11,11 @@ on:
     - cron: '7 * * * *'
     - cron: '37 * * * *'
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'إرسال فوري حتى لو أُرسل تقرير قبل أقل من 40 دقيقة (لتجربة يدوية)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -58,7 +63,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY || vars.OPENROUTER_API_KEY }}
         run: |
           set -o pipefail
-          python main.py --send-once 2>&1 | tee data/last-run.log
+          python main.py --send-once ${{ inputs.force && '--force-send' || '' }} 2>&1 | tee data/last-run.log
 
       # عند الفشل نكتب سجلاً مختصراً ونرفعه إلى المستودع، لأن سجلات Actions
       # تحتاج تسجيل دخول. الملف يظهر في data/last-failure.md بعد أي فشل.
