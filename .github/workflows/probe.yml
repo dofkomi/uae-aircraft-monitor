@@ -1,0 +1,20 @@
+name: Schedule Probe
+
+# ملف مؤقّت للتشخيص فقط: يثبت هل GitHub يُطلق أي جدولة لهذا المستودع أصلاً.
+# لا يرسل شيئاً ولا يلمس الكود. يُحذف بعد انتهاء التشخيص.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: طبع الوقت
+        run: |
+          echo "probe fired at $(date -u '+%Y-%m-%d %H:%M:%SZ')"
+          echo "event=${{ github.event_name }}"
