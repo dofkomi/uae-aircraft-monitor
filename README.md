@@ -95,15 +95,29 @@ Oracle تمنح **VM مجانية مدى الحياة** (Always Free)، وهي �
 #### الخيار 2 — GitHub Actions (مجاني 100% بلا بطاقة ائتمان)
 
 مناسب إن لم ترغب ببطاقة أو خادم. يعمل بجدولة كل 30 دقيقة عبر `--send-once`.
+المستودع المحلي جاهز ومُهيّأ بالفعل (تم `git init` وعمل commit أول).
 
-1. ارفع المشروع إلى مستودع GitHub (خاص أو عام).
-2. أضف السرّين في `Settings → Secrets and variables → Actions`:
-   - `TELEGRAM_BOT_TOKEN`
-   - `TELEGRAM_CHAT_IDS` (معرّف محادثتك؛ احصل عليه من @userinfobot)
-3. ملف `.github/workflows/report.yml` جاهز ويعمل تلقائياً كل 30 دقيقة.
+1. أنشئ مستودعاً فارغاً على GitHub باسم `uae-aircraft-monitor`
+   (**اجعله Public** لتكون دقائق Actions غير محدودة).
+2. اربطه وادفع من جهازك:
+
+   ```bash
+   cd uae-aircraft-monitor
+   git remote add origin https://github.com/<USERNAME>/uae-aircraft-monitor.git
+   git push -u origin main
+   ```
+
+3. في المستودع: `Settings → Secrets and variables → Actions → New repository secret`
+   وأضف:
+   - `TELEGRAM_BOT_TOKEN` = توكن البوت
+   - `TELEGRAM_CHAT_IDS` = `7788234649` (معرّف محادثتك المسجّلة)
+4. من تبويب **Actions** اختر «UAE Aircraft Report» ثم **Run workflow** لتجربة فورية.
+   بعدها يعمل تلقائياً كل 30 دقيقة.
 
 > في هذا الوضع لا يستقبل البوت أوامر `/report` مباشرة (لا يوجد polling متصل)،
-> لكن التقارير تصل تلقائياً كل نصف ساعة.
+> لكن التقارير تصل تلقائياً كل نصف ساعة. ملف `.github/workflows/report.yml`
+> يحفظ قاعدة البيانات بين التشغيلات عبر `actions/cache`، ويُبقي الجدولة نشطة
+> بتحديث ملف صغير مرة كل ~30 يوماً (GitHub يعطّل الجدولة بعد 60 يوماً خمول).
 
 ### الاختبارات
 
