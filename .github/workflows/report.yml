@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   report:
@@ -37,3 +37,18 @@ jobs:
           USE_GEOCODING: '1'
           USE_WATCHLIST: '1'
         run: python main.py --send-once
+
+      # GitHub يعطّل الجدولة بعد 60 يوماً من عدم النشاط؛ نحدّث ملفاً مرة كل ~30 يوماً.
+      - name: إبقاء الجدولة نشطة
+        if: github.event_name == 'schedule'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          last=$(git log -1 --format=%ct -- .github/heartbeat.txt 2>/dev/null || echo 0)
+          now=$(date +%s)
+          if [ $((now - last)) -gt 2592000 ]; then
+            date -u > .github/heartbeat.txt
+            git add .github/heartbeat.txt
+            git commit -m "chore: keep scheduled workflow active"
+            git push
+          fi
