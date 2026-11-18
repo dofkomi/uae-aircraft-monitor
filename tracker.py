@@ -61,6 +61,30 @@ class AircraftTracker:
         self.poll_count = 0
         self._lock = asyncio.Lock()
 
+        self._restore_watchlist()
+
+    def _restore_watchlist(self) -> None:
+        """يستعيد قائمة التتبّع العالمي من القاعدة.
+
+        كل تشغيل سحابي يبدأ بذاكرة فارغة؛ بدون الاستعادة تُنسى الطائرات
+        الإماراتية التي رُصدت في الدورات السابقة، فيتوقّف التتبّع العالمي
+        (ونطاق الساحل) عند حدود مستقبلات الإمارات.
+        """
+        watch = next(
+            (item for item in self.sources if isinstance(item, WatchlistSource)), None
+        )
+        if watch is None:
+            return
+        try:
+            saved = self.store.watchlist()
+        except Exception as exc:  # noqa: BLE001 - لا نُسقط التشغيل بسبب القاعدة
+            log.warning("تعذّرت استعادة قائمة التتبّع: %s", exc)
+            return
+        for icao in saved:
+            watch.add(icao)
+        if saved:
+            log.info("استُعيدت %d طائرة إلى قائمة التتبّع العالمي", len(saved))
+
     # ------------------------------------------------------------------
     async def poll(self) -> dict[str, AircraftState]:
         async with self._lock:
@@ -120,8 +144,10 @@ class AircraftTracker:
                 )
                 if watch:
                     for icao, state in merged.items():
-                        if is_uae_related(state):
+                        if is_uae_related(state) and icao not in watch.extra_icaos:
                             watch.add(icao)
+                            # الحفظ في القاعدة ضروري: كل تشغيل سحابي ذاكرة جديدة.
+                            self.store.add_watch(icao)
 
             # كشف الغياب وتحديد الدولة التي انقطع فوقها الإشارة
             threshold = settings.signal_loss_minutes * 60

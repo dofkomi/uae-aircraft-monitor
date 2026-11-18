@@ -388,6 +388,7 @@ def _sahel_block(tracker) -> dict:
         "events_by_zone": scope["events_by_zone"],
         "landings_by_zone": scope["landings_by_zone"],
         "flagged": scope["flagged"],
+        "coverage_exits": scope.get("coverage_exits", 0),
         "top": scope["top"],
         "note": (
             "الدرجة تجميع مؤشرات مستقلة، والثقة تُشتق من عددها لا من حجم الرقم. "
@@ -854,6 +855,11 @@ def build_local_analysis(snapshot: dict) -> str:
             )
         else:
             lines.append("- لا انقطاعات مرصودة داخل نطاق المتابعة في هذه الفترة.")
+        if sahel.get("coverage_exits"):
+            lines.append(
+                f"- {sahel['coverage_exits']} طائرة غادرت نطاق التغطية فقط "
+                "(ليس شذوذاً ولا دليل إيقاف بث)."
+            )
         top = sahel.get("top") or []
         if top:
             best = top[0]

@@ -144,6 +144,21 @@ class SahelAnomalyTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    def test_watchlist_survives_a_fresh_run(self) -> None:
+        """قائمة التتبّع العالمي تُحفظ في القاعدة وتُستعاد في تشغيل جديد."""
+        from adsb_sources import WatchlistSource
+
+        self.store.add_watch("896123")
+        self.assertEqual(self.store.watchlist(), ["896123"])
+
+        watch = WatchlistSource()
+        self.assertNotIn("896123", watch.extra_icaos)
+        fresh = AircraftTracker(
+            [watch], DummyDB(), self.store, airports=FakeAirports()
+        )
+        self.assertIn("896123", watch.extra_icaos)
+        self.assertIn("896123", fresh.store.watchlist())
+
     def test_scope_names_the_eight_sahel_states_only(self) -> None:
         from sahel import sahel_scope_text
 
@@ -165,16 +180,31 @@ class SahelAnomalyTests(unittest.TestCase):
         self.assertIsNone(zone_at(48.8, 2.3, "FR"))
 
     def test_geometry_flags_deviation_and_impossible_speed(self) -> None:
-        from sahel import _deviation_km, _teleport_kmh
+        from sahel import _path_stats, _segments, _teleport_kmh
 
         straight = [(10.0, 0.0), (11.0, 0.0), (12.0, 0.0), (13.0, 0.0)]
-        self.assertLess(_deviation_km(straight), 1.0)
+        self.assertLess(_path_stats([(a, b, i) for i, (a, b) in enumerate(straight)])[2], 1.0)
 
         detour = [(10.0, 0.0), (11.0, 5.0), (12.0, 4.0), (13.0, 0.0)]
-        self.assertGreater(_deviation_km(detour), 150)
+        points = [(a, b, i * 1800) for i, (a, b) in enumerate(detour)]
+        path_km, straight_km, deviation = _path_stats(points)
+        self.assertGreater(deviation, 150)
+        self.assertGreater(path_km / straight_km, 1.6)  # التفاف مكتشف
 
         jump = [(10.0, 0.0, 0), (20.0, 20.0, 600)]  # ~2400 كم في 10 دقائق
-        self.assertGreater(_teleport_kmh(jump), 1500)
+        speed, distance = _teleport_kmh(jump)
+        self.assertGreater(speed, 1500)
+        self.assertGreater(distance, 300)
+
+        # فجوة قصيرة: اهتزاز رصد لا قفزة
+        jitter = [(10.0, 0.0, 0), (10.5, 0.5, 10)]
+        self.assertEqual(_teleport_kmh(jitter), (0.0, 0.0))
+
+        # رحلتان منفصلتان: لا تُدمجان في هندسة واحدة
+        track = [(10.0, 0.0, 0), (11.0, 0.0, 600), (12.0, 0.0, 1200),
+                 (13.0, 0.0, 1800), (10.0, 0.0, 9000), (11.0, 0.0, 9600),
+                 (12.0, 0.0, 10200), (13.0, 0.0, 10800)]
+        self.assertEqual(len(_segments(track)), 2)
 
     def test_blackout_over_sahel_raises_the_score(self) -> None:
         from datetime import datetime, timezone

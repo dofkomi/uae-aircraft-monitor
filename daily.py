@@ -105,6 +105,7 @@ def build_daily_snapshot(tracker, hours: int = 24) -> dict:
             "events_by_zone": scope["events_by_zone"],
             "landings_by_zone": scope["landings_by_zone"],
             "flagged": scope["flagged"],
+            "coverage_exits": scope.get("coverage_exits", 0),
             "top": scope["top"],
         }
     except Exception as exc:  # noqa: BLE001 - التقرير اليومي يكفي بدونه
@@ -372,6 +373,10 @@ def build_daily_report(tracker, hours: int = 24) -> str:
                 )
             )
         lines.append(f"  • طائرات تجاوزت عتبة الشذوذ: <b>{sahel.get('flagged', 0)}</b>")
+        if sahel.get("coverage_exits"):
+            lines.append(
+                f"  • خروج من نطاق التغطية (ليس شذوذاً): {sahel['coverage_exits']}"
+            )
         for item in (sahel.get("top") or [])[:5]:
             reasons = "؛ ".join(item.get("indicators") or []) or "مؤشرات محدودة"
             lines.append(
@@ -490,6 +495,11 @@ def build_daily_local_analysis(snapshot: dict) -> str:
         )
     elif sahel:
         lines.append("- لا طائرة تجاوزت عتبة الشذوذ داخل نطاق الساحل اليوم.")
+        if sahel.get("coverage_exits"):
+            lines.append(
+                f"- {sahel['coverage_exits']} طائرة غادرت نطاق التغطية فقط "
+                "(ليس شذوذاً ولا دليل إيقاف بث)."
+            )
     else:
         lines.append("- تعذّر بناء تحليل الساحل لهذه الفترة.")
 

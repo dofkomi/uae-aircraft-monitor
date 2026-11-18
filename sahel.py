@@ -68,6 +68,18 @@ ZONE_LABELS = {
 # ترتيب العرض الثابت لدول الساحل (من الغرب إلى الشرق).
 SAHEL_ORDER = ["MR", "SN", "ML", "BF", "NE", "TD", "SD", "ER"]
 
+# ── عتبات هندسة المسار ──────────────────────────────────────────────────────
+# أسرع طائرة نقل/مقاتلة تشغيلية دون 1,400 كم/س؛ ما فوق ذلك خطأ رصد أو تلفيق.
+MAX_PLAUSIBLE_KMH = 1400.0
+# لا تُقيَّم القفزات بين رصدين أقرب من دقيقة (اهتزاز GPS على الأرض والاقتراب).
+MIN_TELEPORT_GAP_S = 60
+# المسافة المباشرة الدنيا لقياس الالتفاف: تحتها تسود مناورات الاقتراب والانتظار.
+MIN_DETOUR_BASE_KM = 150.0
+# فجوة تفصل رحلتين: أطول من 45 دقيقة تعني توقّفاً على الأرض أو رحلة جديدة.
+SEGMENT_GAP_S = 45 * 60
+# أدنى إزاحة تُعدّ قفزة موقع حقيقية (دونها اهتزاز رصد عادي).
+MIN_TELEPORT_KM = 300.0
+
 
 def country_ar(code: str | None) -> str:
     """اسم الدولة بالعربية إن عُرف رمزها، وإلا الرمز نفسه."""
@@ -153,16 +165,55 @@ def _deviation_km(points: list[tuple[float, float]]) -> float:
     return worst
 
 
-def _teleport_kmh(points: list[tuple[float, float, int]]) -> float:
-    """أعلى سرعة ضمنية بين رصدين متتاليين — تكشف قفزات الموقع غير الفيزيائية."""
-    fastest = 0.0
+def _teleport_kmh(points: list[tuple[float, float, int]]) -> tuple[float, float]:
+    """(أعلى سرعة ضمنية، مسافة القفزة) — تكشف قفزات الموقع غير الفيزيائية.
+
+    تُستبعد الفجوات القصيرة (أقل من دقيقة): اهتزاز GPS على الأرض وفي الاقتراب
+    ينتج قفزات صغيرة لا معنى لها. القفزة الحقيقية تحتاج فجوة زمنية معتبرة
+    وإزاحة كبيرة معاً.
+    """
+    fastest, jump_km = 0.0, 0.0
     for (lat1, lon1, t1), (lat2, lon2, t2) in zip(points, points[1:]):
         dt = t2 - t1
-        if dt <= 0:
+        if dt < MIN_TELEPORT_GAP_S:
             continue
-        speed = haversine_km(lat1, lon1, lat2, lon2) / (dt / 3600.0)
-        fastest = max(fastest, speed)
-    return fastest
+        distance = haversine_km(lat1, lon1, lat2, lon2)
+        speed = distance / (dt / 3600.0)
+        if speed > fastest:
+            fastest, jump_km = speed, distance
+    return fastest, jump_km
+
+
+def _segments(
+    points: list[tuple[float, float, int]], max_gap_s: int = SEGMENT_GAP_S
+) -> list[list[tuple[float, float, int]]]:
+    """يقسّم التتبّع إلى رحلات منفصلة عند الفجوات الطويلة (توقّف/رحلة جديدة)."""
+    if not points:
+        return []
+    segments: list[list[tuple[float, float, int]]] = [[points[0]]]
+    for previous, current in zip(points, points[1:]):
+        if current[2] - previous[2] > max_gap_s:
+            segments.append([current])
+        else:
+            segments[-1].append(current)
+    return segments
+
+
+def _path_stats(points: list[tuple[float, float, int]]) -> tuple[float, float, float]:
+    """(طول المسار، المسافة المباشرة، أقصى انحراف) بالكيلومترات لرحلة واحدة.
+
+    طول المسار يستبعد القفزات غير الفيزيائية كي لا يُفسد حساب الالتفاف.
+    """
+    path = 0.0
+    for (lat1, lon1, t1), (lat2, lon2, t2) in zip(points, points[1:]):
+        dt = t2 - t1
+        step = haversine_km(lat1, lon1, lat2, lon2)
+        if dt >= MIN_TELEPORT_GAP_S and dt > 0 and step / (dt / 3600.0) > MAX_PLAUSIBLE_KMH:
+            continue  # قفزة مستحيلة: لا تُحسب جزءاً من المسار
+        path += step
+    straight = haversine_km(points[0][0], points[0][1], points[-1][0], points[-1][1])
+    deviation = _deviation_km([(lat, lon) for lat, lon, _ in points])
+    return path, straight, deviation
 
 
 # ── 3. محرّك درجة الشذوذ ────────────────────────────────────────────────────
@@ -228,7 +279,11 @@ def assess_aircraft(
         result.indicators.append(reason)
 
     # 3.1 انقطاع الإشارة داخل نطاق التركيز
-    for event in events[:1]:
+    # خروج الطائرة من نطاق التغطية (left_coverage) ليس شذوذاً: هو حدّ مستقبلات
+    # تطوعية، لا توقّف بث. لذلك يُستبعد من الدرجة ويُحصى منفصلاً في الملخّص.
+    real_events = [item for item in events if item.reason != "left_coverage"]
+    if real_events:
+        event = real_events[0]
         zone = zone_at(event.last_lat, event.last_lon, event.country_code)
         where = event.country or zone_label(zone)
         if zone == "sahel":
@@ -252,6 +307,17 @@ def assess_aircraft(
                 (datetime.now(timezone.utc) - event.last_seen).total_seconds() // 60
             ),
         }
+    elif events:
+        # آخر رصد عند حدّ التغطية: يُسجّل كسياق بلا درجة شذوذ.
+        event = events[0]
+        result.evidence["blackout"] = {
+            "lat": event.last_lat,
+            "lon": event.last_lon,
+            "country": event.country,
+            "zone": zone_at(event.last_lat, event.last_lon, event.country_code),
+            "coverage_exit": True,
+        }
+        result.evidence["coverage_exit"] = True
 
     # 3.2 الهبوط في مهبط صغير/غير موثّق داخل النطاق
     for landing in landings[:1]:
@@ -276,7 +342,7 @@ def assess_aircraft(
             "kind": kind,
         }
 
-    # 3.3 هندسة المسار: انحراف عن الخط المستقيم وقفزات موقع
+    # 3.3 هندسة المسار: التفاف (طول المسار مقابل المسافة المباشرة) وقفزات موقع
     if since_ts is not None and getattr(tracker, "store", None):
         rows = tracker.store.sightings_for(icao24, since_ts)
         points = [
@@ -284,22 +350,47 @@ def assess_aircraft(
             for r in rows
             if r.get("lat") is not None and r.get("lon") is not None
         ]
-        if len(points) >= 4:
-            deviation = _deviation_km([(lat, lon) for lat, lon, _ in points])
-            if deviation >= 400:
-                add(0.22, f"انحراف كبير عن الخط المستقيم ({int(deviation)} كم)")
-            elif deviation >= 150:
-                add(0.12, f"انحراف عن الخط المستقيم ({int(deviation)} كم)")
-            result.evidence["deviation_km"] = int(deviation)
-        if len(points) >= 2:
-            fastest = _teleport_kmh(points)
-            if fastest > 1500:
+        # تُقاس الهندسة لكل رحلة على حدة: نافذة 24 ساعة قد تحوي عدة رحلات
+        # ذهاباً وإياباً، ومقارنة أول نقطة بآخرها تُنتج «التفافاً» وهمياً.
+        worst_ratio, worst_path, worst_straight = 0.0, 0.0, 0.0
+        deviation = 0.0
+        for segment in _segments(points):
+            if len(segment) < 4:
+                continue
+            path_km, straight_km, segment_dev = _path_stats(segment)
+            deviation = max(deviation, segment_dev)
+            if straight_km < MIN_DETOUR_BASE_KM:
+                continue  # رحلة قصيرة: مناورات الاقتراب تسود
+            ratio = path_km / straight_km
+            if ratio > worst_ratio:
+                worst_ratio, worst_path, worst_straight = ratio, path_km, straight_km
+        if worst_straight:
+            result.evidence["detour_ratio"] = round(worst_ratio, 2)
+            result.evidence["path_km"] = int(worst_path)
+            result.evidence["straight_km"] = int(worst_straight)
+            if worst_ratio >= 2.0:
                 add(
-                    0.12,
-                    f"قفزة موقع غير فيزيائية (سرعة ضمنية {int(fastest)} كم/س) — "
-                    "احتمال تلفيق أو خطأ في مصدر الرصد",
+                    0.18,
+                    f"مسار متعرّج بشكل غير معتاد (طول المسار {worst_ratio:.1f}× "
+                    "المسافة المباشرة في الرحلة نفسها)",
                 )
-            result.evidence["implied_speed_kmh"] = int(fastest)
+            elif worst_ratio >= 1.6:
+                add(
+                    0.10,
+                    f"مسار منحرف عن المباشر (طول المسار {worst_ratio:.1f}× "
+                    "المسافة المباشرة)",
+                )
+        if deviation:
+            result.evidence["deviation_km"] = int(deviation)
+
+        fastest, jump_km = _teleport_kmh(points)
+        result.evidence["implied_speed_kmh"] = int(fastest)
+        if fastest > MAX_PLAUSIBLE_KMH and jump_km >= MIN_TELEPORT_KM:
+            add(
+                0.12,
+                f"قفزة موقع غير فيزيائية ({int(jump_km)} كم في وقت قصير، سرعة "
+                f"ضمنية {int(fastest)} كم/س) — احتمال خطأ رصد أو تصادم رمز Hex",
+            )
 
     # 3.4 مؤشرات الهوية
     if state is not None:
@@ -436,6 +527,10 @@ def build_matrix(
 
     candidates: dict[str, None] = {}
     for event in events:
+        # الخروج من نطاق التغطية ليس شذوذاً، إلا إذا كانت الطائرة إماراتية
+        # (مهمّ معرفة أين خرجت من التغطية) — تُبقى حينها للسياق فقط.
+        if event.reason == "left_coverage" and not is_uae_related_event(event):
+            continue
         zone = zone_at(event.last_lat, event.last_lon, event.country_code)
         if zone or is_uae_related_event(event):
             candidates[event.icao24] = None
@@ -533,6 +628,8 @@ def _to_row(
         entry = "لم يُرصد دخول بري — آخر رصد فوق ممر بحري"
     else:
         entry = "لم يُرصد دخول إلى الساحل"
+    if evidence.get("coverage_exit"):
+        entry = f"{entry} · خرجت من نطاق التغطية"
 
     landing_text = "—"
     if landing.get("airport") or landing.get("airport_name"):
@@ -586,7 +683,11 @@ def summarise(tracker, hours: int = 24, rows: list[MatrixRow] | None = None) -> 
 
     by_zone_events: dict[str, int] = {}
     by_zone_landings: dict[str, int] = {}
+    coverage_exits = 0
     for event in events:
+        if event.reason == "left_coverage":
+            coverage_exits += 1  # خروج من نطاق المستقبلات: ليس شذوذاً
+            continue
         zone = zone_at(event.last_lat, event.last_lon, event.country_code)
         if zone:
             by_zone_events[zone] = by_zone_events.get(zone, 0) + 1
@@ -607,6 +708,7 @@ def summarise(tracker, hours: int = 24, rows: list[MatrixRow] | None = None) -> 
             for key, count in sorted(by_zone_landings.items(), key=lambda kv: -kv[1])
         ],
         "flagged": len(rows),
+        "coverage_exits": coverage_exits,
         "matrix": [row.as_dict() for row in rows],
         "top": [
             {

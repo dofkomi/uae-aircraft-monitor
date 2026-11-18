@@ -119,6 +119,10 @@ class Store:
                     payload    TEXT,
                     fetched_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS watchlist (
+                    icao24   TEXT PRIMARY KEY,
+                    added_at INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS poll_log (
                     id      INTEGER PRIMARY KEY AUTOINCREMENT,
                     at      INTEGER NOT NULL,
@@ -482,6 +486,33 @@ class Store:
                 (since_ts, limit),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def add_watch(self, icao24: str) -> None:
+        """يحفظ طائرة في قائمة التتبّع العالمي (تبقى بعد انتهاء التشغيل)."""
+        icao = (icao24 or "").strip().lower()
+        if not icao:
+            return
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO watchlist (icao24, added_at) VALUES (?, ?)",
+                (icao, int(time.time())),
+            )
+
+    def watchlist(self, limit: int = 2000) -> list[str]:
+        """قائمة التتبّع المحفوظة + طائرات هبطت وهي مرتبطة بالإمارات."""
+        with self._tx() as conn:
+            rows = conn.execute(
+                "SELECT icao24 FROM watchlist ORDER BY added_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+            saved = [row["icao24"] for row in rows]
+            # إضافة تاريخية: طائرات إماراتية هبطت سابقاً حتى لو لم تُحفظ صراحة.
+            extra = conn.execute(
+                "SELECT DISTINCT icao24 FROM landings WHERE uae_related = 1 "
+                "ORDER BY icao24 LIMIT ?",
+                (limit,),
+            ).fetchall()
+        merged = list(dict.fromkeys(saved + [row["icao24"] for row in extra]))
+        return [icao for icao in merged if icao and len(icao) == 6]
 
     def log_poll(self, source: str, count: int, ok: bool, message: str = "") -> None:
         with self._tx() as conn:

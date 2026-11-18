@@ -668,6 +668,11 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         f"  <u>طائرات تجاوزت عتبة الشذوذ:</u> <b>{scope['flagged']}</b> "
         "من أصل ما رُصد داخل النطاق أو المرتبط بالإمارات."
     )
+    if scope.get("coverage_exits"):
+        lines.append(
+            f"  <u>خروج من نطاق التغطية (ليس شذوذاً):</u> {scope['coverage_exits']} "
+            "— طائرات غادرت مجال المستقبلات، لا دليل على إيقاف البث."
+        )
     lines.append("")
 
     lines.append("🧾 <b>مصفوفة الاستخبارات — الحقول التسعة</b>")
@@ -699,7 +704,8 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
         )
     else:
         lines.append(
-            "  • لا طائرة تجاوزت عتبة الشذوذ (20%) خلال 24 ساعة داخل النطاق."
+            "  • لا صفوف في المصفوفة: لم تُرصد أي رحلة داخل نطاق الساحل، ولم "
+            "تتجاوز أي طائرة مرتبطة بالإمارات عتبة الشذوذ (20%) خلال 24 ساعة."
         )
     lines.append("")
 
