@@ -6,3 +6,5 @@ data/chats.json
 data/airports_raw.csv
 data/*.log
 data/preview*.txt
+data/send*.txt
+data/ai_e2e*.txt

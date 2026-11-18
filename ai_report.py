@@ -63,11 +63,12 @@ SYSTEM_PROMPT = """\
 
 DEFAULT_MODELS = {
     "gemini": (
-        "gemini-3.6-flash",
-        "gemini-3.5-flash",
         "gemini-3.1-flash-lite",
-        "gemini-2.5-flash",
+        "gemini-flash-lite-latest",
         "gemini-3-flash-preview",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
+        "gemini-2.5-flash",
     ),
     "groq": (
         "llama-3.3-70b-versatile",
@@ -360,6 +361,19 @@ def build_user_prompt(snapshot: dict) -> str:
     )
 
 
+_NON_TEXT_HINTS = (
+    "tts", "embed", "guard", "rerank", "image", "transcribe", "lyria",
+    "robotics", "computer-use", "deep-research", "antigravity", "omni",
+    "banana", "clip", "audio", "veo", "imagen", "whisper",
+)
+
+
+def _is_text_model(name: str) -> bool:
+    """يستبعد نماذج الصور/الصوت/البحث العميق التي لا تصلح لكتابة تقرير."""
+    lowered = name.lower()
+    return not any(hint in lowered for hint in _NON_TEXT_HINTS)
+
+
 # ---------------------------------------------------------------------------
 class AIAnalyzer:
     """عميل رفيع لأي مزوّد مجاني، مع كشف النموذج وتخزينه مؤقتاً."""
@@ -368,7 +382,8 @@ class AIAnalyzer:
         self.provider = provider if provider is not None else detect_provider()
         self.last_error = ""
         self._model: str | None = None
-        self._models_tried = False
+        self._models: list[str] | None = None
+        self._bad: set[str] = set()
 
     @property
     def available(self) -> bool:
@@ -383,49 +398,53 @@ class AIAnalyzer:
         return f"{self.provider.name} · {model}"
 
     async def analyze(self, snapshot: dict) -> str | None:
+        """يجرّب النماذج المرشّحة بالترتيب حتى ينجح أحدها.
+
+        بعض النماذج الجديدة تُرجع استجابة فارغة أو 404/503 رغم ظهورها في
+        قائمة النماذج، لذا لا نعتمد على اسم واحد بل ننتقل تلقائياً للبديل.
+        """
         if not self.provider:
             return None
-        model = await self._resolve_model()
-        if not model:
-            self.last_error = "تعذّر تحديد نموذج متاح"
-            return None
-        try:
-            raw = await self._call(model, build_user_prompt(snapshot))
-        except Exception as exc:  # noqa: BLE001 - لا نُفشل التقرير بسبب النموذج
-            self.last_error = str(exc)[:300]
-            log.warning("فشل استدعاء نموذج الذكاء الاصطناعي: %s", exc)
-            return None
-        text = (raw or "").strip()
-        if not text:
-            self.last_error = "استجابة فارغة من النموذج"
-            return None
-        return text
+        prompt = build_user_prompt(snapshot)
+        for model in await self._candidates():
+            try:
+                raw = await self._call(model, prompt)
+            except Exception as exc:  # noqa: BLE001 - لا نُفشل التقرير بسبب النموذج
+                self.last_error = str(exc)[:300]
+                log.warning("فشل استدعاء النموذج %s: %s", model, exc)
+                self._bad.add(model)
+                continue
+            text = (raw or "").strip()
+            if text:
+                self._model = model
+                return text
+            log.info("النموذج %s لم يُرجع نصاً — تجربة بديل", model)
+            self._bad.add(model)
+        self.last_error = self.last_error or "لم يُرجع أي نموذج نصاً قابلاً للاستخدام"
+        return None
 
     # ------------------------------------------------------------------
-    async def _resolve_model(self) -> str | None:
+    async def _candidates(self) -> list[str]:
+        """قائمة النماذج المفضّلة القابلة للتجربة، بالترتيب."""
         if settings.ai_model:
-            return settings.ai_model
-        if self._model:
-            return self._model
-        if self._models_tried:
-            return None
-        self._models_tried = True
-        available = await self._list_models()
-        if available:
-            for wanted in self.provider.prefer:
-                if wanted in available:
-                    self._model = wanted
-                    return self._model
-            # لا مطابقة: اختر أول نموذج نصي معقول
-            for name in available:
-                if any(bad in name for bad in ("whisper", "tts", "embed", "guard", "rerank", "image")):
-                    continue
-                self._model = name
-                return self._model
-        if self.provider.prefer:
-            self._model = self.provider.prefer[0]
-            return self._model
-        return None
+            return [settings.ai_model]
+        if self._model and self._model not in self._bad:
+            return [self._model]
+        if self._models is None:
+            self._models = await self._list_models()
+        names = self._models or []
+        ordered: list[str] = []
+        for wanted in self.provider.prefer:
+            if not names or wanted in names:
+                ordered.append(wanted)
+        for name in names:
+            if name in ordered or not _is_text_model(name):
+                continue
+            ordered.append(name)
+        if not ordered:
+            ordered = list(self.provider.prefer)
+        usable = [name for name in ordered if name not in self._bad]
+        return usable[:6] or usable
 
     async def _list_models(self) -> list[str]:
         provider = self.provider
@@ -489,7 +508,13 @@ class AIAnalyzer:
             if not candidates:
                 return None
             parts = (candidates[0].get("content") or {}).get("parts") or []
-            return "\n".join(str(part.get("text", "")) for part in parts).strip() or None
+            # نتجاهل أجزاء «التفكير» (thought) ونبقي النص الظاهر فقط
+            texts = [
+                str(part.get("text", ""))
+                for part in parts
+                if isinstance(part, dict) and not part.get("thought")
+            ]
+            return "\n".join(texts).strip() or None
         choices = payload.get("choices") or []
         if not choices:
             return None
