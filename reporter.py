@@ -283,7 +283,14 @@ def build_report(tracker: AircraftTracker, period_minutes: int | None = None) ->
     diverged = [item for item in landings if item.divergence]
     uae_diverged = [item for item in diverged if item.uae_related]
     other_diverged = [item for item in diverged if not item.uae_related]
-    by_country: Counter[str] = Counter(event.country or "غير محدد" for event in events)
+    def _event_country(event: SignalEvent) -> str:
+        """دولة آخر موقع: المخزّنة، أو تُحدَّد محلياً، أو «فوق المياه»."""
+        if event.country:
+            return event.country
+        text = _country_text(event.last_lat, event.last_lon)
+        return "غير محدد" if text in ("—", "") else text
+
+    by_country: Counter[str] = Counter(_event_country(event) for event in events)
 
     center = (settings.center_lat, settings.center_lon)
 
