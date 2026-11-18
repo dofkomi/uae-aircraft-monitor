@@ -1,11 +1,14 @@
-.env
+﻿.env
 __pycache__/
 *.pyc
 data/*.db
-data/chats.json
 data/airports_raw.csv
 data/*.log
 data/preview*.txt
 data/send*.txt
 data/ai_e2e*.txt
 data/reports/
+
+# ملاحظة: data/chats.json مُتتبَّع في Git عن قصد.
+# يحتوي معرّفات المحادثات المسموح لها باستلام التقارير (قائمة سماح صارمة)
+# حتى يعمل التشغيل السحابي (GitHub Actions) دون الحاجة إلى سرّ إضافي.
