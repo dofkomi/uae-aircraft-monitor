@@ -89,7 +89,7 @@ class Settings:
         self.watchlist_interval_seconds: int = max(
             60, _as_int("WATCHLIST_INTERVAL_SECONDS", 900)
         )
-        self.watchlist_max: int = max(1, _as_int("WATCHLIST_MAX", 20))
+        self.watchlist_max: int = max(1, _as_int("WATCHLIST_MAX", 60))
         self.watchlist_dynamic: bool = _as_bool("WATCHLIST_DYNAMIC", True)
 
         # ── ميزانية OpenSky المجانية ──

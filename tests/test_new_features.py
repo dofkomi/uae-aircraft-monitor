@@ -458,6 +458,19 @@ class OpenSkyBudgetTests(unittest.TestCase):
 
         self.assertTrue(issubclass(WatchlistSource, __import__("adsb_sources").OpenSkySource))
 
+    def test_watchlist_keeps_newest_aircraft_when_capped(self) -> None:
+        from adsb_sources import WatchlistSource
+        from config import settings
+
+        source = WatchlistSource()
+        for index in range(settings.watchlist_max + 5):
+            source.add(f"89{index:04d}")
+
+        self.assertEqual(len(source.icaos), settings.watchlist_max)
+        # الأحدث يُتابع، والأقدم يخرج من النافذة
+        self.assertIn(f"89{settings.watchlist_max + 4:04d}", source.icaos)
+        self.assertNotIn("890000", source.icaos)
+
 
 class DailyReportTests(unittest.TestCase):
     def setUp(self) -> None:

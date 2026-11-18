@@ -315,16 +315,21 @@ class WatchlistSource(OpenSkySource):
         super().__init__()
         self.min_interval = float(settings.watchlist_interval_seconds)
         self.extra_icaos: set[str] = set()
+        self._order: list[str] = []  # ترتيب الإضافة: الأحدث يُتابع أولاً
 
     @property
     def icaos(self) -> list[str]:
-        all_icaos = settings.uae_watch_icao24 | self.extra_icaos
-        return sorted(all_icaos)[: settings.watchlist_max]
+        explicit = sorted(settings.uae_watch_icao24)
+        dynamic = [icao for icao in self._order if icao not in explicit]
+        budget = max(0, settings.watchlist_max - len(explicit))
+        # الأحدث يُتابع أولاً: نافذة محدودة تُدوّر الطائرات بدل تجميد أقدمها.
+        return explicit + list(reversed(dynamic))[:budget]
 
     def add(self, icao24: str) -> None:
         icao = (icao24 or "").strip().lower()
-        if icao and len(icao) == 6:
+        if icao and len(icao) == 6 and icao not in self.extra_icaos:
             self.extra_icaos.add(icao)
+            self._order.append(icao)
 
     async def fetch(self) -> list[AircraftState]:
         icaos = self.icaos
