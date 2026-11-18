@@ -87,10 +87,20 @@ class Settings:
         # تتبّع عالمي لطائرات بعينها (قائمة مراقبة)
         self.use_watchlist: bool = _as_bool("USE_WATCHLIST", True)
         self.watchlist_interval_seconds: int = max(
-            60, _as_int("WATCHLIST_INTERVAL_SECONDS", 300)
+            60, _as_int("WATCHLIST_INTERVAL_SECONDS", 900)
         )
         self.watchlist_max: int = max(1, _as_int("WATCHLIST_MAX", 20))
         self.watchlist_dynamic: bool = _as_bool("WATCHLIST_DYNAMIC", True)
+
+        # ── ميزانية OpenSky المجانية ──
+        # 400 رصيد/يوم للمجهول. كل استعلام /states/all = رصيد واحد (صندوق إحداثيات
+        # صغير أو استعلام icao24 فقط). التجاوز يُرجع 429 ويوقف المصدر ساعات.
+        self.opensky_interval_seconds: int = max(
+            60, _as_int("OPENSKY_INTERVAL_SECONDS", 1800)
+        )
+        self.opensky_daily_credits: int = max(
+            10, _as_int("OPENSKY_DAILY_CREDITS", 360)
+        )
 
         # طائرات إماراتية إضافية نتابعها صراحةً (ICAO24 مفصولة بفواصل)
         self.uae_watch_icao24: frozenset[str] = frozenset(

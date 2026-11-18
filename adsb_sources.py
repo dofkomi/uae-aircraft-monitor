@@ -185,15 +185,40 @@ class AdsbLolSource(BaseSource):
 
 
 class OpenSkySource(BaseSource):
-    """OpenSky Network — مجاني (400 رصيد/يوم للمجهول، 4000 للمسجّل)."""
+    """OpenSky Network — مجاني (400 رصيد/يوم للمجهول، 4000 للمسجّل).
+
+    كل استعلام ``/states/all`` يكلّف رصيداً واحداً على الأقل. مع دورة كل دقيقتين
+    تُستنزف الميزانية اليومية في ساعات، فيصمت المصدر لبقية اليوم بـ429.
+    لذلك: مهلة دنيا طويلة + عدّاد رصيد يومي + احترام ترويسة إعادة المحاولة.
+    """
 
     name = "OpenSky"
     min_interval = 10.0
 
     def __init__(self) -> None:
         super().__init__()
+        self.min_interval = float(settings.opensky_interval_seconds)
         self._token: str | None = None
         self._expires_at = 0.0
+        self._day = None
+        self._used = 0
+        self._cooldown_until = 0.0
+
+    def _budget_allows(self) -> bool:
+        """هل تسمح ميزانية اليوم باستعلام آخر؟"""
+        today = datetime.now(timezone.utc).date()
+        if self._day != today:
+            self._day, self._used = today, 0
+        if time.time() < self._cooldown_until:
+            return False
+        return self._used < settings.opensky_daily_credits
+
+    def _spend(self) -> None:
+        self._used += 1
+
+    def _cool_down(self, seconds: int, message: str) -> None:
+        self._cooldown_until = time.time() + max(60, seconds)
+        self._mark_error(RuntimeError(message))
 
     async def _get_token(self, session: aiohttp.ClientSession) -> str | None:
         if not settings.has_opensky_credentials:
@@ -214,7 +239,13 @@ class OpenSkySource(BaseSource):
         return self._token
 
     async def fetch(self) -> list[AircraftState]:
+        if not self._budget_allows():
+            self._mark_error(
+                RuntimeError("تخطّي OpenSky: ميزانية اليوم مستنفدة أو تبريد بعد 429")
+            )
+            return []
         await self._throttle()
+        self._spend()
         lamin, lomin, lamax, lomax = settings.bbox
         params = {"lamin": lamin, "lomin": lomin, "lamax": lamax, "lomax": lomax}
         try:
@@ -224,7 +255,11 @@ class OpenSkySource(BaseSource):
                 async with session.get(OPENSKY_STATES_URL, params=params, headers=headers) as resp:
                     # 429 = نفد الرصيد المجاني؛ لا نعتبره خطأً برمجياً
                     if resp.status == 429:
-                        self._mark_error(RuntimeError("انتهى الرصيد اليومي المجاني (429)"))
+                        retry = resp.headers.get("X-Rate-Limit-Retry-After-Seconds", "")
+                        self._cool_down(
+                            int(retry) if retry.isdigit() else 3600,
+                            "انتهى الرصيد اليومي المجاني (429) — إيقاف مؤقت",
+                        )
                         return []
                     resp.raise_for_status()
                     payload = await resp.json(content_type=None)
@@ -267,7 +302,7 @@ def _parse_opensky_states(payload: dict, source_name: str) -> list[AircraftState
     return result
 
 
-class WatchlistSource(BaseSource):
+class WatchlistSource(OpenSkySource):
     """تتبّع عالمي لطائرات محددة عبر OpenSky.
 
     استعلام ``icao24`` منفرد يستهلك رصيداً واحداً فقط مهما كان عدد الطائرات،
@@ -296,13 +331,23 @@ class WatchlistSource(BaseSource):
         if not icaos:
             self._mark_ok(0)
             return []
+        if not self._budget_allows():
+            self._mark_error(
+                RuntimeError("تخطّي قائمة التتبّع: ميزانية OpenSky مستنفدة")
+            )
+            return []
         await self._throttle()
+        self._spend()
         params = [("icao24", icao) for icao in icaos]
         try:
             async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
                 async with session.get(OPENSKY_STATES_URL, params=params) as resp:
                     if resp.status == 429:
-                        self._mark_error(RuntimeError("انتهى الرصيد اليومي المجاني (429)"))
+                        retry = resp.headers.get("X-Rate-Limit-Retry-After-Seconds", "")
+                        self._cool_down(
+                            int(retry) if retry.isdigit() else 3600,
+                            "انتهى الرصيد اليومي المجاني (429) — إيقاف مؤقت",
+                        )
                         return []
                     resp.raise_for_status()
                     payload = await resp.json(content_type=None)

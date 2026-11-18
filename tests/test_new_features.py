@@ -421,6 +421,44 @@ class DocumentTests(unittest.TestCase):
             self.assertIn("المحتويات", text)
 
 
+class OpenSkyBudgetTests(unittest.TestCase):
+    """حماية الرصيد المجاني: 400 رصيد/يوم فقط، والدورة كل دقيقتين تُنفده."""
+
+    def test_budget_blocks_after_the_daily_cap(self) -> None:
+        from datetime import datetime, timezone
+
+        from adsb_sources import OpenSkySource
+        from config import settings
+
+        source = OpenSkySource()
+        source._day = datetime.now(timezone.utc).date()
+        source._used = settings.opensky_daily_credits
+        self.assertFalse(source._budget_allows())
+
+    def test_budget_resets_on_a_new_day(self) -> None:
+        from datetime import date
+
+        from adsb_sources import OpenSkySource
+
+        source = OpenSkySource()
+        source._day = date(2020, 1, 1)
+        source._used = 999
+        self.assertTrue(source._budget_allows())
+        self.assertEqual(source._used, 0)
+
+    def test_cooldown_blocks_requests_after_429(self) -> None:
+        from adsb_sources import OpenSkySource
+
+        source = OpenSkySource()
+        source._cool_down(600, "429")
+        self.assertFalse(source._budget_allows())
+
+    def test_watchlist_shares_the_same_guard(self) -> None:
+        from adsb_sources import WatchlistSource
+
+        self.assertTrue(issubclass(WatchlistSource, __import__("adsb_sources").OpenSkySource))
+
+
 class DailyReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
