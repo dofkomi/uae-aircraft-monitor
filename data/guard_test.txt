@@ -1,0 +1,9 @@
+﻿python.exe : 2026-11-18 16:44:11,418 | INFO    | uae-aircraft-monitor | ÏóÏ«Ï▒ Ï¬┘éÏ▒┘èÏ▒ Ïú┘ÅÏ▒Ï│┘ä ┘éÏ¿┘ä 0 
+Ï»┘é┘è┘éÏ® ÔÇö Ï¬Ï«ÏÀ┘æ┘è ┘çÏ░┘ç Ïº┘äÏ»┘êÏ▒Ï® (Ï¡┘àÏº┘èÏ® ┘à┘å Ïº┘äÏ¬┘âÏ▒ÏºÏ▒)
+Au caractère Ligne:1 : 335
++ ... w(); $out = & "..\emirates-neighbors-bot\.venv\Scripts\python.exe" ma ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (2026-11-18 16:4...Ïº┘äÏ¬┘âÏ▒ÏºÏ▒):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+

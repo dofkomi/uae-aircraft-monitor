@@ -5,9 +5,11 @@ name: UAE Aircraft Report
 # اختياري (دراسة الذكاء الاصطناعي المجانية): GEMINI_API_KEY أو GROQ_API_KEY أو OPENROUTER_API_KEY
 on:
   schedule:
-    # الدقيقة 7 لا 0: GitHub يؤجّل بشدة الطلبات المجدولة عند رأس الساعة
-    # (ملايين المستودعات تطلبها في اللحظة نفسها)، وقد تتأخر ساعات أو تُهمَل.
+    # موعدان في الساعة: GitHub يؤجّل بشدة الطلبات المجدولة عند رأس الساعة
+    # (ملايين المستودعات تطلبها في اللحظة نفسها)، وقد يُهمل أحد الموعدين.
+    # الدقيقة 37 احتياطية، وmain.py يتخطّى الإرسال إن أُرسل تقرير قبل 40 دقيقة.
     - cron: '7 * * * *'
+    - cron: '37 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -29,10 +31,12 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      # الحفاظ على قاعدة البيانات بين التشغيلات (أحداث فقدان الإشارة والهبوط)
+      # الحفاظ على قاعدة البيانات وعلامة آخر إرسال بين التشغيلات
       - uses: actions/cache@v4
         with:
-          path: data/aircraft.db
+          path: |
+            data/aircraft.db
+            data/last-send.txt
           key: uae-monitor-db-${{ github.run_id }}
           restore-keys: uae-monitor-db-
 

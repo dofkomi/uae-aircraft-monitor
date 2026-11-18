@@ -5,6 +5,8 @@ import argparse
 import asyncio
 import logging
 import sys
+import time
+from pathlib import Path
 
 from adsb_sources import build_sources
 from aircraft_db import AircraftDB
@@ -21,6 +23,30 @@ from tracker import AircraftTracker
 
 setup_logging()
 log = logging.getLogger("uae-aircraft-monitor")
+
+# ── حماية من التكرار في التشغيل السحابي ──
+# GitHub قد يؤجّل موعداً مجدولاً أو يُهمله، لذا نضع موعدين في الساعة. هذا
+# الملف يحفظ وقت آخر إرسال ناجح، فتتخطّى المحاولة الثانية الإرسال بدل أن
+# يصل التقرير مرتين.
+SEND_GUARD_MINUTES = 40
+SEND_MARKER = Path("data/last-send.txt")
+
+
+def _minutes_since_last_send() -> float | None:
+    try:
+        stamp = float(SEND_MARKER.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return (time.time() - stamp) / 60.0
+
+
+def _mark_sent() -> None:
+    try:
+        SEND_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        SEND_MARKER.write_text(str(time.time()), encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001 - لا نُفشل التقرير بسبب ملف علامة
+        log.warning("تعذّر حفظ علامة الإرسال: %s", exc)
+
 
 
 def build_tracker() -> AircraftTracker:
@@ -60,12 +86,24 @@ async def _once() -> None:
     print(("\n\n" + "─" * 60 + "\n\n").join(messages))
 
 
-async def _send_once() -> None:
+async def _send_once(force: bool = False) -> None:
     """جلب واحد + إرسال التقرير إلى كل المحادثات المسجّلة (للنشر السحابي بالجدولة)."""
     from telegram import Bot
 
     from bot import ReportBot, split_message
     from report_docs import send_documents
+
+    # حماية من التكرار: الجدولة السحابية تُحاول أكثر من مرة في الساعة (موعدان
+    # احتياطيان) لأن GitHub قد يؤجّل أحد الموعدين أو يُهمله. إن أُرسل تقرير
+    # قبل قليل، نتخطّى هذه المحاولة بهدوء.
+    if not force:
+        age = _minutes_since_last_send()
+        if age is not None and age < SEND_GUARD_MINUTES:
+            log.info(
+                "آخر تقرير أُرسل قبل %.0f دقيقة — تخطّي هذه الدورة (حماية من التكرار)",
+                age,
+            )
+            return
 
     tracker = build_tracker()
     await tracker.poll()
@@ -106,6 +144,7 @@ async def _send_once() -> None:
                         settings.report_interval_minutes,
                     )
             log.info("تم إرسال %d رسالة إلى %d محادثة", sent, len(recipients))
+            _mark_sent()
             return
         except Exception as exc:  # noqa: BLE001 - فشل الشبكة لا يفسد الجلب
             last_error = exc
@@ -129,13 +168,18 @@ def main() -> None:
         action="store_true",
         help="جلب بيانات واحدة وإرسال التقرير فوراً (للاستخدام مع جدولة سحابية)",
     )
+    parser.add_argument(
+        "--force-send",
+        action="store_true",
+        help="إرسال فوري حتى لو أُرسل تقرير قبل أقل من 40 دقيقة (للتجربة)",
+    )
     args = parser.parse_args()
 
     if args.once:
         asyncio.run(_once())
         return
     if args.send_once:
-        asyncio.run(_send_once())
+        asyncio.run(_send_once(force=args.force_send))
         return
 
     if not settings.telegram_token:
