@@ -292,6 +292,46 @@ class DailyGuardTests(unittest.TestCase):
         self.assertTrue(self.main._should_include_daily())
 
 
+class SendGuardTests(unittest.TestCase):
+    """تقرير واحد على الأكثر لكل ساعة UTC، دون إسقاط تشغيل الساعة التالي."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        import main
+
+        self.main = main
+        self.old_marker = main.SEND_MARKER
+        main.SEND_MARKER = Path(self.tmp.name) / "last-send.txt"
+
+    def tearDown(self) -> None:
+        self.main.SEND_MARKER = self.old_marker
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _ts(hour: int, minute: int) -> float:
+        return datetime(2026, 11, 19, hour, minute, tzinfo=timezone.utc).timestamp()
+
+    def test_no_marker_allows_send(self) -> None:
+        self.assertIsNone(self.main._send_guard_reason(self._ts(1, 5)))
+
+    def test_recent_send_is_skipped(self) -> None:
+        self.main.SEND_MARKER.write_text(str(self._ts(1, 0)), encoding="utf-8")
+        self.assertIsNotNone(self.main._send_guard_reason(self._ts(1, 5)))
+
+    def test_second_report_in_same_hour_is_skipped(self) -> None:
+        self.main.SEND_MARKER.write_text(str(self._ts(1, 0)), encoding="utf-8")
+        self.assertIsNotNone(self.main._send_guard_reason(self._ts(1, 25)))
+
+    def test_manual_test_does_not_suppress_next_hour(self) -> None:
+        # الحالة الحقيقية: اختبار يدوي 00:43 ثم تشغيل cron-job.org عند 01:05.
+        self.main.SEND_MARKER.write_text(str(self._ts(0, 43)), encoding="utf-8")
+        self.assertIsNone(self.main._send_guard_reason(self._ts(1, 5)))
+
+    def test_normal_hourly_slot_is_allowed(self) -> None:
+        self.main.SEND_MARKER.write_text(str(self._ts(0, 5)), encoding="utf-8")
+        self.assertIsNone(self.main._send_guard_reason(self._ts(1, 5)))
+
+
 class UaeOnlyReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

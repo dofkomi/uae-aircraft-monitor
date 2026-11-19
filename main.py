@@ -6,6 +6,7 @@ import asyncio
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from adsb_sources import build_sources
@@ -25,21 +26,47 @@ setup_logging()
 log = logging.getLogger("uae-aircraft-monitor")
 
 # ── حماية من التكرار في التشغيل السحابي ──
-# GitHub قد يؤجّل موعداً مجدولاً أو يُهمله، لذا نضع موعدين في الساعة. هذا
-# الملف يحفظ وقت آخر إرسال ناجح، فتتخطّى المحاولة الثانية الإرسال بدل أن
-# يصل التقرير مرتين.
-SEND_GUARD_MINUTES = 40
+# المُشغِّل الخارجي (cron-job.org) يرسل مرة كل ساعة، وقد يعود جدول GitHub
+# يوماً ما (موعدان احتياطيان) أو يُعاد تشغيل الدورة يدوياً. القاعدة:
+# تقرير واحد على الأكثر لكل ساعة UTC، مع نافذة قصيرة ضد إعادة المحاولة.
+# نافذة الـ40 دقيقة القديمة كانت تُسقط تشغيل الساعة التالي إذا جرّب المستخدم
+# إرسالاً يدوياً قبل موعده بـ22 دقيقة؛ أصبحت النافذة 10 دقائق + قيد الساعة.
+SEND_GUARD_MINUTES = 10
 SEND_MARKER = Path("data/last-send.txt")
 # إيقاع منفصل للتقرير التفصيلي: كل 24 ساعة مرة واحدة، لا مع كل تقرير ساعي.
 DAILY_MARKER = Path("data/last-daily.txt")
 
 
-def _minutes_since_last_send() -> float | None:
+def _last_send_stamp() -> float | None:
     try:
-        stamp = float(SEND_MARKER.read_text(encoding="utf-8").strip())
+        return float(SEND_MARKER.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
-    return (time.time() - stamp) / 60.0
+
+
+def _same_hour_slot(stamp: float, now_ts: float | None = None) -> bool:
+    """هل آخر إرسال والآن داخل نفس ساعة UTC؟"""
+    now = datetime.fromtimestamp(
+        time.time() if now_ts is None else now_ts, timezone.utc
+    )
+    then = datetime.fromtimestamp(stamp, timezone.utc)
+    return (now.year, now.month, now.day, now.hour) == (
+        then.year, then.month, then.day, then.hour
+    )
+
+
+def _send_guard_reason(now_ts: float | None = None) -> str | None:
+    """سبب تخطّي هذه الدورة، أو ``None`` إن حان تقرير جديد."""
+    stamp = _last_send_stamp()
+    if stamp is None:
+        return None
+    now_ts = time.time() if now_ts is None else now_ts
+    age = (now_ts - stamp) / 60.0
+    if age < SEND_GUARD_MINUTES:
+        return f"آخر تقرير أُرسل قبل {age:.0f} دقيقة"
+    if _same_hour_slot(stamp, now_ts):
+        return "أُرسل تقرير هذه الساعة بالفعل"
+    return None
 
 
 def _mark_sent() -> None:
@@ -121,16 +148,13 @@ async def _send_once(force: bool = False) -> None:
     from bot import ReportBot, split_message
     from report_docs import send_documents
 
-    # حماية من التكرار: الجدولة السحابية تُحاول أكثر من مرة في الساعة (موعدان
-    # احتياطيان) لأن GitHub قد يؤجّل أحد الموعدين أو يُهمله. إن أُرسل تقرير
-    # قبل قليل، نتخطّى هذه المحاولة بهدوء.
+    # حماية من التكرار: تقرير واحد على الأكثر لكل ساعة UTC. يمنع تكرار
+    # المحاولات المتقاربة (إعادة تشغيل يدوية أو موعدان احتياطيان في GitHub)
+    # دون أن يُسقط تشغيل الساعة التالي بسبب اختبار يدوي قبل موعده بدقائق.
     if not force:
-        age = _minutes_since_last_send()
-        if age is not None and age < SEND_GUARD_MINUTES:
-            log.info(
-                "آخر تقرير أُرسل قبل %.0f دقيقة — تخطّي هذه الدورة (حماية من التكرار)",
-                age,
-            )
+        reason = _send_guard_reason()
+        if reason is not None:
+            log.info("%s — تخطّي هذه الدورة (حماية من التكرار)", reason)
             return
 
     tracker = build_tracker()
@@ -203,7 +227,7 @@ def main() -> None:
     parser.add_argument(
         "--force-send",
         action="store_true",
-        help="إرسال فوري حتى لو أُرسل تقرير قبل أقل من 40 دقيقة (للتجربة)",
+        help="إرسال فوري حتى لو أُرسل تقرير هذه الساعة (للتجربة)",
     )
     args = parser.parse_args()
 
